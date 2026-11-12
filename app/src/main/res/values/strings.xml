@@ -1,0 +1,4 @@
+<resources>
+    <!-- The one place the display name lives. Rename the app here. -->
+    <string name="app_name">Pillion Talk</string>
+</resources>

@@ -1,0 +1,19 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+    Placeholder icon: two speech bubbles (rider and pillion) on a 108x108 canvas.
+    Only the middle ~66x66 is guaranteed to be visible after the launcher masks it.
+-->
+<vector xmlns:android="http://schemas.android.com/apk/res/android"
+    android:width="108dp"
+    android:height="108dp"
+    android:viewportWidth="108"
+    android:viewportHeight="108">
+    <!-- Front bubble (rider) -->
+    <path
+        android:fillColor="#FFFFB300"
+        android:pathData="M34,36h26a6,6 0,0 1,6 6v14a6,6 0,0 1,-6 6h-16l-8,7v-7h-2a6,6 0,0 1,-6 -6v-14a6,6 0,0 1,6 -6z" />
+    <!-- Back bubble (pillion) -->
+    <path
+        android:fillColor="#FFFFFFFF"
+        android:pathData="M56,48h18a6,6 0,0 1,6 6v10a6,6 0,0 1,-6 6h-1v6l-7,-6h-10a6,6 0,0 1,-6 -6v-10a6,6 0,0 1,6 -6z" />
+</vector>

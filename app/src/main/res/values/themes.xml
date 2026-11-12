@@ -1,0 +1,7 @@
+<resources>
+    <!--
+        This XML theme only covers the instant before Compose draws (e.g. the window background).
+        The real look of the app is defined in Kotlin, in ui/theme/Theme.kt.
+    -->
+    <style name="Theme.PillionTalk" parent="android:Theme.Material.NoActionBar" />
+</resources>
