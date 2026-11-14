@@ -2,9 +2,37 @@
 <!--
     The manifest is the app's ID card for Android: its name, icon, which screens
     (activities) and background services it has, and which permissions it needs.
-    No permissions yet: we'll add Wi-Fi, Bluetooth and microphone ones as we need them.
 -->
-<manifest xmlns:android="http://schemas.android.com/apk/res/android">
+<manifest xmlns:android="http://schemas.android.com/apk/res/android"
+    xmlns:tools="http://schemas.android.com/tools">
+
+    <!-- The app is useless without Wi-Fi Direct, so the Play Store should hide it from phones that lack it. -->
+    <uses-feature
+        android:name="android.hardware.wifi.direct"
+        android:required="true" />
+
+    <!-- Read and change Wi-Fi state: needed for every Wi-Fi Direct call. Granted automatically at install. -->
+    <uses-permission android:name="android.permission.ACCESS_WIFI_STATE" />
+    <uses-permission android:name="android.permission.CHANGE_WIFI_STATE" />
+
+    <!--
+        "Runtime" permission the user must approve, and it differs by Android version:
+        - Android 12 (API 31-32): Wi-Fi Direct needs location permission, because nearby
+          Wi-Fi devices could in theory reveal where you are.
+        - Android 13+ (API 33+): a dedicated NEARBY_WIFI_DEVICES permission replaces it.
+          "neverForLocation" promises we don't use it to work out location, so no location prompt.
+        maxSdkVersion="32" means the location permissions are only requested on Android 12.
+    -->
+    <uses-permission
+        android:name="android.permission.ACCESS_FINE_LOCATION"
+        android:maxSdkVersion="32" />
+    <uses-permission
+        android:name="android.permission.ACCESS_COARSE_LOCATION"
+        android:maxSdkVersion="32" />
+    <uses-permission
+        android:name="android.permission.NEARBY_WIFI_DEVICES"
+        android:usesPermissionFlags="neverForLocation"
+        tools:targetApi="33" />
 
     <application
         android:allowBackup="true"
