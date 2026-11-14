@@ -8,7 +8,13 @@ helmet headset ⇄ (Bluetooth) ⇄ phone ⇄ (Wi-Fi Direct, 5 GHz, UDP) ⇄ phon
 
 ## Status
 
-Phase 1, step 1: the project skeleton. The app shows a "Hello, Pillion!" screen.
+Phase 1 in progress. The app has a home screen where you pick your seat, and a ride screen:
+
+- **I'm riding** creates a Wi-Fi Direct group (preferring 5 GHz) and waits for the pillion.
+- **I'm the pillion** finds and joins the rider's group.
+- Both screens show live connection status, the band in use, and connection details.
+
+Voice is next.
 
 ## Stack
 

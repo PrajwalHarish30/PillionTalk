@@ -1,0 +1,4 @@
+<resources>
+    <!-- Same as PillionColors.Background in Theme.kt. -->
+    <color name="background">#FF0E1318</color>
+</resources>

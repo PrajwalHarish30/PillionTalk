@@ -9,11 +9,16 @@ import android.net.wifi.p2p.WifiP2pManager
 import android.os.Looper
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.suspendCancellableCoroutine
+import java.net.Inet4Address
+import java.net.NetworkInterface
 import kotlin.coroutines.resume
 import kotlin.coroutines.resumeWithException
 
+/** Which seat you're in. The rider's phone hosts the Wi-Fi Direct group; the pillion's phone joins it. */
+enum class Role { RIDER, PILLION }
+
 /**
- * Creates and removes the Wi-Fi Direct group that the other phone will join.
+ * The Wi-Fi Direct link between the two phones.
  *
  * Wi-Fi Direct in one paragraph: one phone becomes the "group owner", which behaves like a
  * small Wi-Fi router (it has a network name and password, and hands out IP addresses).
@@ -25,7 +30,7 @@ import kotlin.coroutines.resumeWithException
  * straight-line code, just like `await` in Dart.
  */
 @SuppressLint("MissingPermission") // The UI asks for the permission before calling any of this.
-class WifiDirectHost(context: Context) {
+class WifiDirectLink(context: Context) {
 
     private val manager: WifiP2pManager? =
         context.applicationContext.getSystemService(WifiP2pManager::class.java)
@@ -35,71 +40,128 @@ class WifiDirectHost(context: Context) {
     private val channel: WifiP2pManager.Channel? =
         manager?.initialize(context.applicationContext, Looper.getMainLooper(), null)
 
-    /** Creates the group, preferring 5 GHz, and returns its details once it's up. */
-    suspend fun start(): HostedGroup {
-        val manager = manager ?: throw WifiDirectException("Wi-Fi Direct", WifiP2pManager.P2P_UNSUPPORTED)
-        val channel = channel ?: throw WifiDirectException("Wi-Fi Direct", WifiP2pManager.P2P_UNSUPPORTED)
+    /** Rider: create the group, preferring 5 GHz, and return its details once it's up. */
+    suspend fun host(): LinkInfo {
+        val (manager, channel) = requireP2p()
+        removeExistingGroup(manager, channel)
 
-        // 1. A group left over from an earlier run makes createGroup fail with BUSY, so clear it first.
-        if (requestGroup(manager, channel) != null) {
-            awaitAction("removeGroup") { manager.removeGroup(channel, it) }
-        }
-
-        // 2. Ask for 5 GHz. If this phone can't do it, fall back to letting Android pick the band.
+        // Ask for 5 GHz. If this phone can't do it, fall back to letting Android pick the band.
         var fallbackReason: String? = null
         try {
-            awaitAction("createGroup (5 GHz)") { manager.createGroup(channel, buildConfig(WifiP2pConfig.GROUP_OWNER_BAND_5GHZ), it) }
+            awaitAction("createGroup (5 GHz)") { manager.createGroup(channel, hostConfig(WifiP2pConfig.GROUP_OWNER_BAND_5GHZ), it) }
         } catch (e: WifiDirectException) {
             // Common causes: the Wi-Fi chip has no 5 GHz Wi-Fi Direct support, or the phone is
             // connected to a 2.4 GHz router. Most phones have one Wi-Fi radio, so the group must
             // share the router's channel. (On the bike there's no router, so this goes away.)
             fallbackReason = "${e.message}. Is the phone connected to a 2.4 GHz Wi-Fi network?"
-            awaitAction("createGroup (auto band)") { manager.createGroup(channel, buildConfig(WifiP2pConfig.GROUP_OWNER_BAND_AUTO), it) }
+            awaitAction("createGroup (auto band)") { manager.createGroup(channel, hostConfig(WifiP2pConfig.GROUP_OWNER_BAND_AUTO), it) }
         }
 
-        // 3. "Success" only means the request was accepted. The group takes a moment to come up,
-        //    so poll for its details for up to ~5 seconds.
+        // "Success" only means the request was accepted. The group takes a moment to come up,
+        // so poll for its details for up to ~5 seconds.
         repeat(20) {
             val group = requestGroup(manager, channel)
             if (group != null && group.frequency > 0) {
-                val info = requestConnectionInfo(manager, channel)
-                return HostedGroup(
-                    networkName = group.networkName,
-                    passphrase = group.passphrase,
-                    frequencyMhz = group.frequency,
-                    ownerIp = info.groupOwnerAddress?.hostAddress,
-                    interfaceName = group.`interface`,
-                    fallbackReason = fallbackReason,
-                )
+                return group.toLinkInfo(Role.RIDER, requestConnectionInfo(manager, channel), fallbackReason)
             }
             delay(250)
         }
-        throw IllegalStateException("The group was created but never reported its details")
+        throw IllegalStateException("The ride network was created but never came up. Try again.")
     }
 
-    /** Tears the group down. Safe to call even if no group exists. */
-    suspend fun stop() {
+    /** Pillion: join the rider's group by its network name and password. */
+    suspend fun join(): LinkInfo {
+        val (manager, channel) = requireP2p()
+        removeExistingGroup(manager, channel)
+
+        // With a network name and password, Android scans for that network and joins it
+        // directly: no "accept connection?" popup on the rider's phone.
+        val config = WifiP2pConfig.Builder()
+            .setNetworkName(NETWORK_NAME)
+            .setPassphrase(PASSPHRASE)
+            .build()
+        awaitAction("connect") { manager.connect(channel, config, it) }
+
+        // Scanning and joining take a few seconds. Wait up to ~30 seconds.
+        repeat(60) {
+            val info = requestConnectionInfo(manager, channel)
+            if (info.groupFormed && !info.isGroupOwner) {
+                val group = requestGroup(manager, channel)
+                if (group != null) return group.toLinkInfo(Role.PILLION, info, fallbackReason = null)
+            }
+            delay(500)
+        }
+        manager.cancelConnect(channel, null)
+        throw IllegalStateException("Couldn't find your rider's phone. Is it hosting a ride nearby?")
+    }
+
+    /**
+     * Who is on the other end right now, or null if the group is gone.
+     * Rider: the phones that joined. Pillion: the rider's phone.
+     */
+    suspend fun peers(role: Role): List<String>? {
+        val (manager, channel) = requireP2p()
+        val group = requestGroup(manager, channel) ?: return null
+        val devices = if (role == Role.RIDER) group.clientList.toList() else listOfNotNull(group.owner)
+        return devices.map { it.deviceName.ifBlank { it.deviceAddress } }
+    }
+
+    /** Leave or tear down the group. Safe to call even if there's nothing to leave. */
+    suspend fun leave() {
+        val (manager, channel) = requireP2p()
+        manager.cancelConnect(channel, null) // in case a join is still in progress
+        removeExistingGroup(manager, channel)
+    }
+
+    /** Fire-and-forget version of [leave], for when we can't wait (e.g. the app is closing). */
+    fun release() {
         val manager = manager ?: return
         val channel = channel ?: return
+        manager.cancelConnect(channel, null)
+        manager.removeGroup(channel, null)
+    }
+
+    // --- Helpers -------------------------------------------------------------------------------
+
+    private fun requireP2p(): Pair<WifiP2pManager, WifiP2pManager.Channel> {
+        val manager = manager ?: throw WifiDirectException("Wi-Fi Direct", WifiP2pManager.P2P_UNSUPPORTED)
+        val channel = channel ?: throw WifiDirectException("Wi-Fi Direct", WifiP2pManager.P2P_UNSUPPORTED)
+        return manager to channel
+    }
+
+    /** A group left over from an earlier run makes createGroup/connect fail with BUSY. */
+    private suspend fun removeExistingGroup(manager: WifiP2pManager, channel: WifiP2pManager.Channel) {
         if (requestGroup(manager, channel) != null) {
             awaitAction("removeGroup") { manager.removeGroup(channel, it) }
         }
     }
 
-    /** Fire-and-forget version of [stop], for when we can't wait (e.g. the screen is being destroyed). */
-    fun release() {
-        val manager = manager ?: return
-        val channel = channel ?: return
-        manager.removeGroup(channel, null)
-    }
-
-    private fun buildConfig(band: Int): WifiP2pConfig =
+    private fun hostConfig(band: Int): WifiP2pConfig =
         WifiP2pConfig.Builder()
             .setNetworkName(NETWORK_NAME)
             .setPassphrase(PASSPHRASE)
             .setGroupOperatingBand(band)
             .enablePersistentMode(false) // don't let Android remember this group between runs
             .build()
+
+    private fun WifiP2pGroup.toLinkInfo(role: Role, info: WifiP2pInfo, fallbackReason: String?) = LinkInfo(
+        role = role,
+        networkName = networkName,
+        frequencyMhz = frequency,
+        hostIp = info.groupOwnerAddress?.hostAddress,
+        // The rider's phone *is* the group owner, so its address is the owner address.
+        myIp = ipv4Of(`interface`) ?: if (role == Role.RIDER) info.groupOwnerAddress?.hostAddress else null,
+        interfaceName = `interface`,
+        fallbackReason = fallbackReason,
+    )
+
+    /** This phone's IPv4 address on the Wi-Fi Direct interface (e.g. "p2p-wlan0-0"). */
+    private fun ipv4Of(interfaceName: String?): String? = runCatching {
+        NetworkInterface.getByName(interfaceName ?: return null)
+            ?.inetAddresses?.toList()
+            ?.firstOrNull { it is Inet4Address }
+            ?.hostAddress
+    }.getOrNull()
 
     // --- Callback → suspend adapters -------------------------------------------------------------
 
@@ -141,14 +203,17 @@ class WifiDirectHost(context: Context) {
     }
 }
 
-/** Everything we want to show (and later send to the other phone) about a running group. */
-data class HostedGroup(
+/** Everything we know about the link, for showing on screen (and later for the audio code). */
+data class LinkInfo(
+    val role: Role,
     val networkName: String,
-    val passphrase: String,
     val frequencyMhz: Int,
-    val ownerIp: String?,
+    /** The rider's phone (group owner). Always 192.168.49.1 on Android. */
+    val hostIp: String?,
+    /** This phone's own address on the link. */
+    val myIp: String?,
     val interfaceName: String?,
-    /** Why 5 GHz wasn't used, or null if it was. */
+    /** Why 5 GHz wasn't used, or null if it was (or if we're the pillion and didn't choose). */
     val fallbackReason: String?,
 ) {
     val band: Band
