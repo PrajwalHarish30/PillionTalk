@@ -20,12 +20,15 @@ import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
+import androidx.compose.foundation.horizontalScroll
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material3.Button
 import androidx.compose.material3.ButtonDefaults
+import androidx.compose.material3.FilterChip
+import androidx.compose.material3.FilterChipDefaults
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.Surface
@@ -49,6 +52,8 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import com.prajwal.pilliontalk.ui.theme.PillionColors
 import com.prajwal.pilliontalk.ui.theme.PillionTalkTheme
+import com.prajwal.pilliontalk.voice.AudioOutput
+import com.prajwal.pilliontalk.voice.OutputKind
 import com.prajwal.pilliontalk.voice.VoiceStats
 import com.prajwal.pilliontalk.wifidirect.Band
 import com.prajwal.pilliontalk.wifidirect.LinkInfo
@@ -63,6 +68,7 @@ fun RideScreen(
     state: RideState,
     voice: VoiceStats,
     onToggleMute: () -> Unit,
+    onSelectOutput: (Int) -> Unit,
     onEnd: () -> Unit,
     onRetry: () -> Unit,
     modifier: Modifier = Modifier,
@@ -108,7 +114,7 @@ fun RideScreen(
 
             if (state is RideState.Connected) {
                 BandChip(state.link)
-                VoicePanel(voice, onToggleMute)
+                VoicePanel(voice, onToggleMute, onSelectOutput)
                 ConnectionDetails(state.link)
             }
             if (state is RideState.Failed) {
@@ -230,7 +236,7 @@ private fun BandChip(link: LinkInfo) {
  * The talk controls: where audio is going, a big mute button, and live link quality.
  */
 @Composable
-private fun VoicePanel(voice: VoiceStats, onToggleMute: () -> Unit) {
+private fun VoicePanel(voice: VoiceStats, onToggleMute: () -> Unit, onSelectOutput: (Int) -> Unit) {
     Surface(
         shape = RoundedCornerShape(20.dp),
         color = MaterialTheme.colorScheme.surfaceVariant,
@@ -250,11 +256,22 @@ private fun VoicePanel(voice: VoiceStats, onToggleMute: () -> Unit) {
                         style = MaterialTheme.typography.titleMedium,
                     )
                     Text(
-                        voice.error ?: voice.output.ifEmpty { "Choosing audio output…" },
+                        voice.error ?: voice.output?.let { "Audio: ${it.label}" } ?: "Choosing audio output…",
                         style = MaterialTheme.typography.bodyMedium,
                         color = if (voice.error != null) PillionColors.Bad else MaterialTheme.colorScheme.onSurfaceVariant,
                     )
                 }
+            }
+
+            if (voice.outputs.isNotEmpty()) {
+                OutputPicker(voice.outputs, voice.output, onSelectOutput)
+            }
+            if (voice.output?.kind == OutputKind.SPEAKER) {
+                Text(
+                    "On speaker, keep the phones apart or you'll get echo and howling.",
+                    style = MaterialTheme.typography.bodySmall,
+                    color = PillionColors.Warn,
+                )
             }
 
             // Big mute toggle. Amber when you're live, red when muted, so it's obvious at a glance.
@@ -280,6 +297,31 @@ private fun VoicePanel(voice: VoiceStats, onToggleMute: () -> Unit) {
                     Stat("Gaps", voice.underruns.toString())
                 }
             }
+        }
+    }
+}
+
+/**
+ * One chip per available output. FilterChip is Material's "pick one of these" chip
+ * (Flutter: ChoiceChip). It scrolls sideways if there are too many to fit.
+ */
+@Composable
+private fun OutputPicker(outputs: List<AudioOutput>, current: AudioOutput?, onSelect: (Int) -> Unit) {
+    Row(
+        modifier = Modifier.fillMaxWidth().horizontalScroll(rememberScrollState()),
+        horizontalArrangement = Arrangement.spacedBy(8.dp),
+    ) {
+        outputs.forEach { output ->
+            val selected = output.kind == current?.kind && output.label == current.label
+            FilterChip(
+                selected = selected,
+                onClick = { onSelect(output.id) },
+                label = { Text("${output.kind.emoji}  ${output.label}", maxLines = 1) },
+                colors = FilterChipDefaults.filterChipColors(
+                    selectedContainerColor = MaterialTheme.colorScheme.primary,
+                    selectedLabelColor = MaterialTheme.colorScheme.onPrimary,
+                ),
+            )
         }
     }
 }
@@ -346,9 +388,16 @@ private val previewLink = LinkInfo(
     fallbackReason = null,
 )
 
+private val previewHeadset = AudioOutput(1, OutputKind.BLUETOOTH, "Helmet BT")
+
 private val previewVoice = VoiceStats(
     running = true,
-    output = "Bluetooth headset (Helmet BT)",
+    outputs = listOf(
+        previewHeadset,
+        AudioOutput(2, OutputKind.EARPIECE, "Phone"),
+        AudioOutput(3, OutputKind.SPEAKER, "Speaker"),
+    ),
+    output = previewHeadset,
     received = 1200,
     lost = 3,
     pingMs = 6,
@@ -363,7 +412,7 @@ private fun RiderWaitingPreview() {
         RideScreen(
             RideState.Connected(previewLink, emptyList()),
             voice = previewVoice.copy(hearingPeer = false, pingMs = null),
-            onToggleMute = {}, onEnd = {}, onRetry = {},
+            onToggleMute = {}, onSelectOutput = {}, onEnd = {}, onRetry = {},
         )
     }
 }
@@ -375,7 +424,7 @@ private fun PillionTalkingPreview() {
         RideScreen(
             RideState.Connected(previewLink.copy(role = Role.PILLION, myIp = "192.168.49.23"), listOf("Nothing Phone (4a) Pro")),
             voice = previewVoice,
-            onToggleMute = {}, onEnd = {}, onRetry = {},
+            onToggleMute = {}, onSelectOutput = {}, onEnd = {}, onRetry = {},
         )
     }
 }
@@ -387,7 +436,7 @@ private fun MutedPreview() {
         RideScreen(
             RideState.Connected(previewLink, listOf("Redmi Note 11 Pro+")),
             voice = previewVoice.copy(muted = true),
-            onToggleMute = {}, onEnd = {}, onRetry = {},
+            onToggleMute = {}, onSelectOutput = {}, onEnd = {}, onRetry = {},
         )
     }
 }
@@ -399,7 +448,7 @@ private fun FailedPreview() {
         RideScreen(
             RideState.Failed(Role.PILLION, "Couldn't find your rider's phone. Is it hosting a ride nearby?"),
             voice = VoiceStats(),
-            onToggleMute = {}, onEnd = {}, onRetry = {},
+            onToggleMute = {}, onSelectOutput = {}, onEnd = {}, onRetry = {},
         )
     }
 }

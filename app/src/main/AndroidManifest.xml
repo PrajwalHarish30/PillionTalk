@@ -44,6 +44,9 @@
     <!-- Switch the phone into "call mode" and route audio to the helmet headset. Granted at install. -->
     <uses-permission android:name="android.permission.MODIFY_AUDIO_SETTINGS" />
 
+    <!-- Hold a Wi-Fi lock so the radio doesn't nap between voice packets. Granted at install. -->
+    <uses-permission android:name="android.permission.WAKE_LOCK" />
+
     <application
         android:allowBackup="true"
         android:icon="@mipmap/ic_launcher"

@@ -3,14 +3,13 @@ package com.prajwal.pilliontalk.voice
 import android.annotation.SuppressLint
 import android.content.Context
 import android.media.AudioAttributes
-import android.media.AudioDeviceInfo
 import android.media.AudioFormat
-import android.media.AudioManager
 import android.media.AudioRecord
 import android.media.AudioTrack
 import android.media.MediaRecorder
 import android.media.audiofx.AcousticEchoCanceler
 import android.media.audiofx.NoiseSuppressor
+import android.net.wifi.WifiManager
 import android.os.Process
 import android.os.SystemClock
 import kotlinx.coroutines.flow.MutableStateFlow
@@ -21,16 +20,20 @@ import java.net.DatagramSocket
 import java.net.InetAddress
 import java.net.InetSocketAddress
 import java.net.SocketAddress
+import java.nio.ByteBuffer
+import java.nio.ByteOrder
 import java.util.concurrent.ArrayBlockingQueue
 import java.util.concurrent.atomic.AtomicInteger
 import java.util.concurrent.atomic.AtomicLong
 
-/** What the voice link is doing, for the UI. Updated twice a second. */
+/** What the voice link is doing, for the UI. Updated twice a second, and when the output changes. */
 data class VoiceStats(
     val running: Boolean = false,
     val muted: Boolean = false,
-    /** Where the audio is going, e.g. "Helmet headset (XYZ)". */
-    val output: String = "",
+    /** Where voice can go, for the output picker. */
+    val outputs: List<AudioOutput> = emptyList(),
+    /** Where voice is going right now. */
+    val output: AudioOutput? = null,
     val sent: Int = 0,
     val received: Int = 0,
     val lost: Int = 0,
@@ -38,7 +41,7 @@ data class VoiceStats(
     val pingMs: Long? = null,
     /** How much audio is waiting to be played, in milliseconds. */
     val bufferedMs: Int = 0,
-    /** Times we had nothing to play and filled in silence. */
+    /** Times a frame wasn't there when it was needed and we had to cover the gap. */
     val underruns: Int = 0,
     /** True if we've heard from the other phone in the last 2 seconds. */
     val hearingPeer: Boolean = false,
@@ -58,13 +61,23 @@ data class VoiceStats(
  * nothing else.
  *   1. capture:  read 20 ms from the mic → send it
  *   2. receive:  wait for packets → voice goes into the jitter buffer, pings get answered
- *   3. playback: take 20 ms from the jitter buffer → play it (or silence if it's empty)
+ *   3. playback: take 20 ms from the jitter buffer → play it (covering any gaps)
  *   4. control:  send a ping every second, publish stats twice a second
  */
 @SuppressLint("MissingPermission") // The UI asks for RECORD_AUDIO before a ride starts.
 class VoiceEngine(context: Context) {
 
-    private val audioManager = context.getSystemService(AudioManager::class.java)
+    private val router = AudioRouter(context).apply { onChanged = { publishStats() } }
+
+    /**
+     * Wi-Fi saves power by napping between packets and delivering them in bursts. Great for web
+     * pages, terrible for voice: you hear it as stutter. A low-latency lock asks the phone not to
+     * nap while we hold it. Android honours it while the app is on screen (which it is: the ride
+     * screen keeps the display on).
+     */
+    private val wifiLock = context.applicationContext.getSystemService(WifiManager::class.java)
+        .createWifiLock(WifiManager.WIFI_MODE_FULL_LOW_LATENCY, "PillionTalk:voice")
+        .apply { setReferenceCounted(false) }
 
     private val _stats = MutableStateFlow(VoiceStats())
     val stats: StateFlow<VoiceStats> = _stats.asStateFlow()
@@ -74,15 +87,17 @@ class VoiceEngine(context: Context) {
     @Volatile private var muted = false
     @Volatile private var peer: SocketAddress? = null
     @Volatile private var lastHeardAt = 0L
+    @Volatile private var error: String? = null
 
     private var socket: DatagramSocket? = null
-    private var output = ""
     private val threads = mutableListOf<Thread>()
 
     /**
-     * The jitter buffer. Packets don't arrive perfectly every 20 ms over Wi-Fi; they bunch
-     * up and spread out. Holding a few frames back smooths that over. It's capped at
-     * MAX_BUFFERED_FRAMES so delay can't build up: if it's full, the oldest frame is dropped.
+     * The jitter buffer. Packets don't arrive perfectly every 20 ms over Wi-Fi; they bunch up
+     * and spread out. Holding a few frames back smooths that over.
+     * - Playback waits until TARGET_FRAMES are queued before starting ("prefill").
+     * - It's capped at MAX_BUFFERED_FRAMES; when full, the oldest frame is dropped so delay
+     *   can't keep growing.
      */
     private val jitterBuffer = ArrayBlockingQueue<ByteArray>(MAX_BUFFERED_FRAMES)
 
@@ -106,10 +121,12 @@ class VoiceEngine(context: Context) {
 
         try {
             socket = DatagramSocket(PORT).apply { soTimeout = 500 }
-            output = routeAudioToBestDevice()
+            router.start()
+            wifiLock.acquire()
         } catch (e: Exception) {
             stop()
-            _stats.value = VoiceStats(error = "Couldn't start voice: ${e.message}")
+            error = "Couldn't start voice: ${e.message}"
+            publishStats()
             return
         }
 
@@ -129,38 +146,18 @@ class VoiceEngine(context: Context) {
         threads.clear()
         socket = null
         jitterBuffer.clear()
-        audioManager.clearCommunicationDevice()
-        audioManager.mode = AudioManager.MODE_NORMAL
-        _stats.value = _stats.value.copy(running = false, hearingPeer = false)
+        router.stop()
+        if (wifiLock.isHeld) wifiLock.release()
+        publishStats()
     }
 
     fun setMuted(value: Boolean) {
         muted = value
-        _stats.value = _stats.value.copy(muted = value)
+        publishStats()
     }
 
-    // --- Routing --------------------------------------------------------------------------------
-
-    /**
-     * Put the phone in "call mode" and choose where audio goes: helmet Bluetooth headset first,
-     * then wired headphones, then the earpiece (quiet, so two phones in one room don't howl).
-     */
-    private fun routeAudioToBestDevice(): String {
-        audioManager.mode = AudioManager.MODE_IN_COMMUNICATION
-        val devices = audioManager.availableCommunicationDevices
-        val choice =
-            devices.firstOrNull { it.type == AudioDeviceInfo.TYPE_BLUETOOTH_SCO || it.type == AudioDeviceInfo.TYPE_BLE_HEADSET }
-                ?: devices.firstOrNull { it.type == AudioDeviceInfo.TYPE_WIRED_HEADSET || it.type == AudioDeviceInfo.TYPE_USB_HEADSET }
-                ?: devices.firstOrNull { it.type == AudioDeviceInfo.TYPE_BUILTIN_EARPIECE }
-        if (choice != null) audioManager.setCommunicationDevice(choice)
-
-        return when (choice?.type) {
-            AudioDeviceInfo.TYPE_BLUETOOTH_SCO, AudioDeviceInfo.TYPE_BLE_HEADSET -> "Bluetooth headset (${choice.productName})"
-            AudioDeviceInfo.TYPE_WIRED_HEADSET, AudioDeviceInfo.TYPE_USB_HEADSET -> "Wired headphones"
-            AudioDeviceInfo.TYPE_BUILTIN_EARPIECE -> "Phone earpiece"
-            else -> "Phone speaker"
-        }
-    }
+    /** Send voice to a different output (earpiece, speaker, headset…). */
+    fun selectOutput(id: Int) = router.select(id)
 
     // --- The four loops ---------------------------------------------------------------------------
 
@@ -220,6 +217,7 @@ class VoiceEngine(context: Context) {
                     if (expectedSequence >= 0) {
                         val gap = (sequence - expectedSequence) and 0xFFFF
                         if (gap in 1..1000) lost.addAndGet(gap) // a jump means packets went missing
+                        if (gap > 1000) continue // an old, late packet: too late to play, skip it
                     }
                     expectedSequence = (sequence + 1) and 0xFFFF
                     received.incrementAndGet()
@@ -251,16 +249,44 @@ class VoiceEngine(context: Context) {
             .build()
 
         val silence = ByteArray(FRAME_BYTES)
+        var lastFrame: ByteArray? = null
+        var concealed = 0      // how many frames in a row we've had to make up
+        var buffering = true   // waiting for the jitter buffer to fill to TARGET_FRAMES
+
         track.play()
         try {
             while (running) {
-                // Nothing to play: fill in silence. Only count it as a "gap" once the other phone
-                // has started sending, and only if it isn't simply muted (no packets while muted).
-                val frame = jitterBuffer.poll() ?: silence.also {
-                    if (received.get() > 0 && SystemClock.elapsedRealtime() - lastHeardAt < 200) underruns.incrementAndGet()
+                // write() blocks until there's room, so every pass of this loop takes ~20 ms.
+                if (buffering) {
+                    if (jitterBuffer.size >= TARGET_FRAMES) buffering = false
+                    track.write(silence, 0, FRAME_BYTES)
+                    continue
                 }
-                // write() blocks until there's room, so it paces this loop at real time.
-                track.write(frame, 0, frame.size)
+
+                val frame = jitterBuffer.poll()
+                when {
+                    frame != null -> {
+                        track.write(frame, 0, frame.size)
+                        lastFrame = frame
+                        concealed = 0
+                    }
+                    // A frame is late or lost. For one or two frames, replay the last one more
+                    // quietly: the ear barely notices, where a hole of silence sounds like a click.
+                    lastFrame != null && concealed < MAX_CONCEALED_FRAMES -> {
+                        concealed++
+                        lastFrame = fade(lastFrame, 0.5f)
+                        track.write(lastFrame, 0, lastFrame.size)
+                        if (isTalking()) underruns.incrementAndGet()
+                    }
+                    // Still nothing: the other side went quiet (muted) or the link hiccuped.
+                    // Play silence and re-fill the buffer before playing again.
+                    else -> {
+                        if (isTalking()) underruns.incrementAndGet()
+                        lastFrame = null
+                        buffering = true
+                        track.write(silence, 0, FRAME_BYTES)
+                    }
+                }
             }
         } finally {
             track.stop()
@@ -284,6 +310,17 @@ class VoiceEngine(context: Context) {
 
     // --- Helpers ---------------------------------------------------------------------------------
 
+    /** Voice packets arrived in the last 200 ms, so a missing frame is a real gap, not a pause. */
+    private fun isTalking() = SystemClock.elapsedRealtime() - lastHeardAt < 200
+
+    /** Returns a quieter copy of a frame: every 16-bit sample multiplied by [gain]. */
+    private fun fade(frame: ByteArray, gain: Float): ByteArray {
+        val out = frame.copyOf()
+        val samples = ByteBuffer.wrap(out).order(ByteOrder.LITTLE_ENDIAN).asShortBuffer()
+        for (i in 0 until samples.limit()) samples.put(i, (samples.get(i) * gain).toInt().toShort())
+        return out
+    }
+
     private fun send(bytes: ByteArray, to: SocketAddress) {
         try {
             socket?.send(DatagramPacket(bytes, bytes.size, to))
@@ -296,14 +333,16 @@ class VoiceEngine(context: Context) {
         _stats.value = VoiceStats(
             running = running,
             muted = muted,
-            output = output,
+            outputs = router.outputs,
+            output = router.current,
             sent = sent.get(),
             received = received.get(),
             lost = lost.get(),
             pingMs = lastPingMs.get().takeIf { it >= 0 },
             bufferedMs = jitterBuffer.size * FRAME_MS,
             underruns = underruns.get(),
-            hearingPeer = SystemClock.elapsedRealtime() - lastHeardAt < 2_000,
+            hearingPeer = running && SystemClock.elapsedRealtime() - lastHeardAt < 2_000,
+            error = error,
         )
     }
 
@@ -311,6 +350,7 @@ class VoiceEngine(context: Context) {
         listOf(sent, received, lost, underruns).forEach { it.set(0) }
         lastPingMs.set(-1)
         lastHeardAt = 0
+        error = null
         jitterBuffer.clear()
     }
 
@@ -331,7 +371,9 @@ class VoiceEngine(context: Context) {
         const val SAMPLE_RATE = 16_000 // "wideband" voice: the same rate as HD Voice calls
         const val FRAME_MS = 20
         const val FRAME_BYTES = SAMPLE_RATE / 1000 * FRAME_MS * 2 // 320 samples × 2 bytes = 640
-        const val MAX_BUFFERED_FRAMES = 6 // at most 120 ms waiting to be played
+        const val TARGET_FRAMES = 3       // start playing once 60 ms is queued
+        const val MAX_BUFFERED_FRAMES = 8 // never more than 160 ms waiting to be played
+        const val MAX_CONCEALED_FRAMES = 2
         private const val ENCODING = AudioFormat.ENCODING_PCM_16BIT
     }
 }

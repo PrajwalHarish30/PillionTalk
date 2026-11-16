@@ -106,6 +106,10 @@ class RideViewModel(app: Application) : AndroidViewModel(app) {
         voiceEngine.setMuted(!voice.value.muted)
     }
 
+    fun selectOutput(id: Int) {
+        voiceEngine.selectOutput(id)
+    }
+
     fun end() {
         rideJob?.cancel()
         viewModelScope.launch {

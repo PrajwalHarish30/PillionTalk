@@ -109,6 +109,7 @@ fun PillionTalkApp(viewModel: RideViewModel = viewModel()) {
                     state = state,
                     voice = voice,
                     onToggleMute = viewModel::toggleMute,
+                    onSelectOutput = viewModel::selectOutput,
                     onEnd = viewModel::end,
                     onRetry = viewModel::retry,
                     modifier = Modifier.padding(innerPadding),
