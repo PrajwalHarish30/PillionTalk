@@ -18,6 +18,20 @@ android {
         versionName = "0.4.0" // what humans see
     }
 
+    // Every APK must be signed, and Android only installs an update over an existing app if
+    // both were signed with the same key. Normally each computer has its own random debug key,
+    // so a build from GitHub Actions couldn't update one built on your PC. Keeping one debug key
+    // in the repo means every debug build, from anywhere, can update every other one.
+    // It's only for debug builds: a real release key must never be committed.
+    signingConfigs {
+        getByName("debug") {
+            storeFile = file("debug.keystore")
+            storePassword = "android"
+            keyAlias = "androiddebugkey"
+            keyPassword = "android"
+        }
+    }
+
     buildTypes {
         release {
             isMinifyEnabled = false

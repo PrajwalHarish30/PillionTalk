@@ -17,6 +17,8 @@ captures/
 .DS_Store
 Thumbs.db
 
-# Signing keys - never commit these
+# Signing keys - never commit these...
 *.jks
 *.keystore
+# ...except the shared debug key (see app/build.gradle.kts). It signs nothing important.
+!app/debug.keystore

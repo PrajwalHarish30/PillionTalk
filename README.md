@@ -33,6 +33,14 @@ Next: Opus compression, a foreground service so voice keeps going with the scree
 4. **Music share:** built-in player, mixed with voice and ducked when someone talks
 5. **Later:** capture from other music apps, group rides, headset button controls
 
+## Download
+
+Every push to `main` builds a fresh debug APK and publishes it as the
+[latest-debug release](https://github.com/PrajwalHarish30/PillionTalk/releases/tag/latest-debug).
+Direct link for phones:
+
+https://github.com/PrajwalHarish30/PillionTalk/releases/download/latest-debug/PillionTalk-debug.apk
+
 ## Building
 
 Open the folder in Android Studio, or from a terminal:
