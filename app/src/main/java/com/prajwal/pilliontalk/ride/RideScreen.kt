@@ -31,11 +31,13 @@ import androidx.compose.material3.FilterChip
 import androidx.compose.material3.FilterChipDefaults
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedButton
+import androidx.compose.material3.Slider
+import androidx.compose.material3.SliderDefaults
+import androidx.compose.material3.Switch
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
-import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.saveable.rememberSaveable
@@ -44,7 +46,6 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.drawscope.Stroke
-import androidx.compose.ui.platform.LocalView
 import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.tooling.preview.Preview
@@ -69,18 +70,12 @@ fun RideScreen(
     voice: VoiceStats,
     onToggleMute: () -> Unit,
     onSelectOutput: (Int) -> Unit,
+    onVolumeChange: (Float) -> Unit,
+    onBoostChange: (Boolean) -> Unit,
     onEnd: () -> Unit,
     onRetry: () -> Unit,
     modifier: Modifier = Modifier,
 ) {
-    // Keep the screen on during a ride, so the phone doesn't sleep and cut the audio.
-    // (A foreground service will make this unnecessary in the next phase.)
-    val view = LocalView.current
-    DisposableEffect(Unit) {
-        view.keepScreenOn = true
-        onDispose { view.keepScreenOn = false } // DisposableEffect ≈ initState + dispose in Flutter
-    }
-
     // Turn the state into what to show. A `when` over a sealed type must cover every case.
     val role = when (state) {
         RideState.Idle -> Role.RIDER
@@ -114,7 +109,7 @@ fun RideScreen(
 
             if (state is RideState.Connected) {
                 BandChip(state.link)
-                VoicePanel(voice, onToggleMute, onSelectOutput)
+                VoicePanel(voice, onToggleMute, onSelectOutput, onVolumeChange, onBoostChange)
                 ConnectionDetails(state.link)
             }
             if (state is RideState.Failed) {
@@ -236,7 +231,13 @@ private fun BandChip(link: LinkInfo) {
  * The talk controls: where audio is going, a big mute button, and live link quality.
  */
 @Composable
-private fun VoicePanel(voice: VoiceStats, onToggleMute: () -> Unit, onSelectOutput: (Int) -> Unit) {
+private fun VoicePanel(
+    voice: VoiceStats,
+    onToggleMute: () -> Unit,
+    onSelectOutput: (Int) -> Unit,
+    onVolumeChange: (Float) -> Unit,
+    onBoostChange: (Boolean) -> Unit,
+) {
     Surface(
         shape = RoundedCornerShape(20.dp),
         color = MaterialTheme.colorScheme.surfaceVariant,
@@ -272,6 +273,10 @@ private fun VoicePanel(voice: VoiceStats, onToggleMute: () -> Unit, onSelectOutp
                     style = MaterialTheme.typography.bodySmall,
                     color = PillionColors.Warn,
                 )
+            }
+
+            if (voice.running) {
+                VolumeControl(voice.volume, voice.boost, onVolumeChange, onBoostChange)
             }
 
             // Big mute toggle. Amber when you're live, red when muted, so it's obvious at a glance.
@@ -322,6 +327,45 @@ private fun OutputPicker(outputs: List<AudioOutput>, current: AudioOutput?, onSe
                     selectedLabelColor = MaterialTheme.colorScheme.onPrimary,
                 ),
             )
+        }
+    }
+}
+
+/**
+ * How loud the other person is. The slider is the phone's call volume (the volume buttons move
+ * it too). Boost goes past the phone's maximum for loud roads.
+ */
+@Composable
+private fun VolumeControl(
+    volume: Float,
+    boost: Boolean,
+    onVolumeChange: (Float) -> Unit,
+    onBoostChange: (Boolean) -> Unit,
+) {
+    Column {
+        Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(12.dp)) {
+            Text("🔈", fontSize = 18.sp)
+            Slider(
+                value = volume,
+                onValueChange = onVolumeChange,
+                modifier = Modifier.weight(1f),
+                colors = SliderDefaults.colors(
+                    thumbColor = MaterialTheme.colorScheme.primary,
+                    activeTrackColor = MaterialTheme.colorScheme.primary,
+                ),
+            )
+            Text("🔊", fontSize = 18.sp)
+        }
+        Row(verticalAlignment = Alignment.CenterVertically) {
+            Column(Modifier.weight(1f)) {
+                Text("Boost", style = MaterialTheme.typography.titleSmall)
+                Text(
+                    "Louder than max, for wind and engine noise",
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                )
+            }
+            Switch(checked = boost, onCheckedChange = onBoostChange)
         }
     }
 }
@@ -412,7 +456,7 @@ private fun RiderWaitingPreview() {
         RideScreen(
             RideState.Connected(previewLink, emptyList()),
             voice = previewVoice.copy(hearingPeer = false, pingMs = null),
-            onToggleMute = {}, onSelectOutput = {}, onEnd = {}, onRetry = {},
+            onToggleMute = {}, onSelectOutput = {}, onVolumeChange = {}, onBoostChange = {}, onEnd = {}, onRetry = {},
         )
     }
 }
@@ -424,7 +468,7 @@ private fun PillionTalkingPreview() {
         RideScreen(
             RideState.Connected(previewLink.copy(role = Role.PILLION, myIp = "192.168.49.23"), listOf("Nothing Phone (4a) Pro")),
             voice = previewVoice,
-            onToggleMute = {}, onSelectOutput = {}, onEnd = {}, onRetry = {},
+            onToggleMute = {}, onSelectOutput = {}, onVolumeChange = {}, onBoostChange = {}, onEnd = {}, onRetry = {},
         )
     }
 }
@@ -436,7 +480,7 @@ private fun MutedPreview() {
         RideScreen(
             RideState.Connected(previewLink, listOf("Redmi Note 11 Pro+")),
             voice = previewVoice.copy(muted = true),
-            onToggleMute = {}, onSelectOutput = {}, onEnd = {}, onRetry = {},
+            onToggleMute = {}, onSelectOutput = {}, onVolumeChange = {}, onBoostChange = {}, onEnd = {}, onRetry = {},
         )
     }
 }
@@ -448,7 +492,7 @@ private fun FailedPreview() {
         RideScreen(
             RideState.Failed(Role.PILLION, "Couldn't find your rider's phone. Is it hosting a ride nearby?"),
             voice = VoiceStats(),
-            onToggleMute = {}, onSelectOutput = {}, onEnd = {}, onRetry = {},
+            onToggleMute = {}, onSelectOutput = {}, onVolumeChange = {}, onBoostChange = {}, onEnd = {}, onRetry = {},
         )
     }
 }

@@ -4,6 +4,7 @@ import android.annotation.SuppressLint
 import android.content.Context
 import android.media.AudioAttributes
 import android.media.AudioFormat
+import android.media.AudioManager
 import android.media.AudioRecord
 import android.media.AudioTrack
 import android.media.MediaRecorder
@@ -25,6 +26,7 @@ import java.nio.ByteOrder
 import java.util.concurrent.ArrayBlockingQueue
 import java.util.concurrent.atomic.AtomicInteger
 import java.util.concurrent.atomic.AtomicLong
+import kotlin.math.roundToInt
 
 /** What the voice link is doing, for the UI. Updated twice a second, and when the output changes. */
 data class VoiceStats(
@@ -45,6 +47,10 @@ data class VoiceStats(
     val underruns: Int = 0,
     /** True if we've heard from the other phone in the last 2 seconds. */
     val hearingPeer: Boolean = false,
+    /** Call volume, 0.0 to 1.0. The phone's volume buttons change it too. */
+    val volume: Float = 0f,
+    /** Extra digital gain on top of the maximum volume, for loud roads. */
+    val boost: Boolean = false,
     val error: String? = null,
 ) {
     val lossPercent: Double get() = if (received + lost == 0) 0.0 else lost * 100.0 / (received + lost)
@@ -68,6 +74,7 @@ data class VoiceStats(
 class VoiceEngine(context: Context) {
 
     private val router = AudioRouter(context).apply { onChanged = { publishStats() } }
+    private val audioManager = context.getSystemService(AudioManager::class.java)
 
     /**
      * Wi-Fi saves power by napping between packets and delivering them in bursts. Great for web
@@ -85,6 +92,7 @@ class VoiceEngine(context: Context) {
     // @Volatile: written by one thread, read by others. Guarantees they all see the latest value.
     @Volatile private var running = false
     @Volatile private var muted = false
+    @Volatile private var boostGain = 1f
     @Volatile private var peer: SocketAddress? = null
     @Volatile private var lastHeardAt = 0L
     @Volatile private var error: String? = null
@@ -158,6 +166,30 @@ class VoiceEngine(context: Context) {
 
     /** Send voice to a different output (earpiece, speaker, headset…). */
     fun selectOutput(id: Int) = router.select(id)
+
+    /**
+     * Sets the phone's call volume (the same one the volume buttons change during a call),
+     * as a fraction of its maximum. Android's call volume has a minimum above zero, so it
+     * never goes fully silent; use mute on the other phone for that.
+     */
+    fun setVolume(fraction: Float) {
+        val stream = AudioManager.STREAM_VOICE_CALL
+        val min = audioManager.getStreamMinVolume(stream)
+        val max = audioManager.getStreamMaxVolume(stream)
+        val index = (min + fraction.coerceIn(0f, 1f) * (max - min)).roundToInt()
+        audioManager.setStreamVolume(stream, index, 0)
+        publishStats()
+    }
+
+    /**
+     * Boost multiplies every sample by 2 (+6 dB) before playing it: louder than the phone's
+     * maximum, for wind and engine noise. Loud peaks get clipped (flattened), which can sound
+     * harsh, so it's opt-in.
+     */
+    fun setBoost(on: Boolean) {
+        boostGain = if (on) BOOST_GAIN else 1f
+        publishStats()
+    }
 
     // --- The four loops ---------------------------------------------------------------------------
 
@@ -266,7 +298,8 @@ class VoiceEngine(context: Context) {
                 val frame = jitterBuffer.poll()
                 when {
                     frame != null -> {
-                        track.write(frame, 0, frame.size)
+                        val out = if (boostGain != 1f) scale(frame, boostGain) else frame
+                        track.write(out, 0, out.size)
                         lastFrame = frame
                         concealed = 0
                     }
@@ -274,7 +307,7 @@ class VoiceEngine(context: Context) {
                     // quietly: the ear barely notices, where a hole of silence sounds like a click.
                     lastFrame != null && concealed < MAX_CONCEALED_FRAMES -> {
                         concealed++
-                        lastFrame = fade(lastFrame, 0.5f)
+                        lastFrame = scale(lastFrame, 0.5f)
                         track.write(lastFrame, 0, lastFrame.size)
                         if (isTalking()) underruns.incrementAndGet()
                     }
@@ -313,12 +346,25 @@ class VoiceEngine(context: Context) {
     /** Voice packets arrived in the last 200 ms, so a missing frame is a real gap, not a pause. */
     private fun isTalking() = SystemClock.elapsedRealtime() - lastHeardAt < 200
 
-    /** Returns a quieter copy of a frame: every 16-bit sample multiplied by [gain]. */
-    private fun fade(frame: ByteArray, gain: Float): ByteArray {
+    /**
+     * Returns a copy of a frame with every 16-bit sample multiplied by [gain]. Results are clamped
+     * to the 16-bit range: without that, a loud sample would wrap around and become a loud crack.
+     */
+    private fun scale(frame: ByteArray, gain: Float): ByteArray {
         val out = frame.copyOf()
         val samples = ByteBuffer.wrap(out).order(ByteOrder.LITTLE_ENDIAN).asShortBuffer()
-        for (i in 0 until samples.limit()) samples.put(i, (samples.get(i) * gain).toInt().toShort())
+        for (i in 0 until samples.limit()) {
+            val scaled = (samples.get(i) * gain).toInt().coerceIn(Short.MIN_VALUE.toInt(), Short.MAX_VALUE.toInt())
+            samples.put(i, scaled.toShort())
+        }
         return out
+    }
+
+    private fun currentVolume(): Float {
+        val stream = AudioManager.STREAM_VOICE_CALL
+        val min = audioManager.getStreamMinVolume(stream)
+        val max = audioManager.getStreamMaxVolume(stream)
+        return if (max == min) 1f else (audioManager.getStreamVolume(stream) - min).toFloat() / (max - min)
     }
 
     private fun send(bytes: ByteArray, to: SocketAddress) {
@@ -342,6 +388,8 @@ class VoiceEngine(context: Context) {
             bufferedMs = jitterBuffer.size * FRAME_MS,
             underruns = underruns.get(),
             hearingPeer = running && SystemClock.elapsedRealtime() - lastHeardAt < 2_000,
+            volume = currentVolume(), // re-read every time, so the volume buttons show up too
+            boost = boostGain != 1f,
             error = error,
         )
     }
@@ -374,6 +422,7 @@ class VoiceEngine(context: Context) {
         const val TARGET_FRAMES = 3       // start playing once 60 ms is queued
         const val MAX_BUFFERED_FRAMES = 8 // never more than 160 ms waiting to be played
         const val MAX_CONCEALED_FRAMES = 2
+        const val BOOST_GAIN = 2f // +6 dB
         private const val ENCODING = AudioFormat.ENCODING_PCM_16BIT
     }
 }

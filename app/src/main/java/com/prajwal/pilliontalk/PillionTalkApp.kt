@@ -69,7 +69,9 @@ fun PillionTalkApp(viewModel: RideViewModel = viewModel()) {
     ) { results ->
         val role = pendingRole
         pendingRole = null
-        if (results.values.all { it } && role != null) {
+        // Notifications are nice to have (the "ride active" notification), not required.
+        val required = results.filterKeys { it != Manifest.permission.POST_NOTIFICATIONS }
+        if (required.values.all { it } && role != null) {
             viewModel.start(role)
         } else {
             scope.launch { snackbar.showSnackbar("Pillion Talk needs Nearby devices (to connect) and Microphone (to talk).") }
@@ -84,7 +86,13 @@ fun PillionTalkApp(viewModel: RideViewModel = viewModel()) {
             viewModel.start(role)
         } else {
             pendingRole = role
-            permissionLauncher.launch(ridePermissions)
+            // Ask for notifications in the same dialog sequence (Android 13+), but don't require it.
+            val ask = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
+                ridePermissions + Manifest.permission.POST_NOTIFICATIONS
+            } else {
+                ridePermissions
+            }
+            permissionLauncher.launch(ask)
         }
     }
 
@@ -110,6 +118,8 @@ fun PillionTalkApp(viewModel: RideViewModel = viewModel()) {
                     voice = voice,
                     onToggleMute = viewModel::toggleMute,
                     onSelectOutput = viewModel::selectOutput,
+                    onVolumeChange = viewModel::setVolume,
+                    onBoostChange = viewModel::setBoost,
                     onEnd = viewModel::end,
                     onRetry = viewModel::retry,
                     modifier = Modifier.padding(innerPadding),
