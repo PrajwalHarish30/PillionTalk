@@ -32,6 +32,7 @@ import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.saveable.rememberSaveable
@@ -40,6 +41,7 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.drawscope.Stroke
+import androidx.compose.ui.platform.LocalView
 import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.tooling.preview.Preview
@@ -47,6 +49,7 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import com.prajwal.pilliontalk.ui.theme.PillionColors
 import com.prajwal.pilliontalk.ui.theme.PillionTalkTheme
+import com.prajwal.pilliontalk.voice.VoiceStats
 import com.prajwal.pilliontalk.wifidirect.Band
 import com.prajwal.pilliontalk.wifidirect.LinkInfo
 import com.prajwal.pilliontalk.wifidirect.Role
@@ -58,10 +61,20 @@ import com.prajwal.pilliontalk.wifidirect.Role
 @Composable
 fun RideScreen(
     state: RideState,
+    voice: VoiceStats,
+    onToggleMute: () -> Unit,
     onEnd: () -> Unit,
     onRetry: () -> Unit,
     modifier: Modifier = Modifier,
 ) {
+    // Keep the screen on during a ride, so the phone doesn't sleep and cut the audio.
+    // (A foreground service will make this unnecessary in the next phase.)
+    val view = LocalView.current
+    DisposableEffect(Unit) {
+        view.keepScreenOn = true
+        onDispose { view.keepScreenOn = false } // DisposableEffect ≈ initState + dispose in Flutter
+    }
+
     // Turn the state into what to show. A `when` over a sealed type must cover every case.
     val role = when (state) {
         RideState.Idle -> Role.RIDER
@@ -95,7 +108,7 @@ fun RideScreen(
 
             if (state is RideState.Connected) {
                 BandChip(state.link)
-                VoicePlaceholder(enabled = state.paired)
+                VoicePanel(voice, onToggleMute)
                 ConnectionDetails(state.link)
             }
             if (state is RideState.Failed) {
@@ -213,29 +226,69 @@ private fun BandChip(link: LinkInfo) {
     }
 }
 
-/** Where the talk controls will go once audio exists. Honest about not being there yet. */
+/**
+ * The talk controls: where audio is going, a big mute button, and live link quality.
+ */
 @Composable
-private fun VoicePlaceholder(enabled: Boolean) {
+private fun VoicePanel(voice: VoiceStats, onToggleMute: () -> Unit) {
     Surface(
         shape = RoundedCornerShape(20.dp),
         color = MaterialTheme.colorScheme.surfaceVariant,
         modifier = Modifier.fillMaxWidth(),
     ) {
-        Row(
-            modifier = Modifier.padding(16.dp),
-            verticalAlignment = Alignment.CenterVertically,
-            horizontalArrangement = Arrangement.spacedBy(14.dp),
-        ) {
-            Text("🎙️", fontSize = 28.sp)
-            Column(Modifier.weight(1f)) {
-                Text("Voice", style = MaterialTheme.typography.titleMedium)
-                Text(
-                    if (enabled) "Linked up. Talking arrives in the next build." else "Starts once you're both connected.",
-                    style = MaterialTheme.typography.bodyMedium,
-                    color = MaterialTheme.colorScheme.onSurfaceVariant,
-                )
+        Column(Modifier.padding(16.dp), verticalArrangement = Arrangement.spacedBy(14.dp)) {
+            Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(14.dp)) {
+                Text(if (voice.muted) "🔇" else "🎙️", fontSize = 28.sp)
+                Column(Modifier.weight(1f)) {
+                    Text(
+                        when {
+                            voice.error != null -> "Voice problem"
+                            !voice.running -> "Voice starting…"
+                            voice.hearingPeer -> "Talking"
+                            else -> "Waiting for the other phone"
+                        },
+                        style = MaterialTheme.typography.titleMedium,
+                    )
+                    Text(
+                        voice.error ?: voice.output.ifEmpty { "Choosing audio output…" },
+                        style = MaterialTheme.typography.bodyMedium,
+                        color = if (voice.error != null) PillionColors.Bad else MaterialTheme.colorScheme.onSurfaceVariant,
+                    )
+                }
+            }
+
+            // Big mute toggle. Amber when you're live, red when muted, so it's obvious at a glance.
+            Button(
+                onClick = onToggleMute,
+                enabled = voice.running,
+                modifier = Modifier.fillMaxWidth().height(56.dp),
+                shape = RoundedCornerShape(16.dp),
+                colors = if (voice.muted) {
+                    ButtonDefaults.buttonColors(containerColor = PillionColors.Bad, contentColor = Color.Black)
+                } else {
+                    ButtonDefaults.buttonColors()
+                },
+            ) {
+                Text(if (voice.muted) "Muted · tap to talk" else "Mute my mic", style = MaterialTheme.typography.titleMedium)
+            }
+
+            if (voice.running) {
+                Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween) {
+                    Stat("Ping", voice.pingMs?.let { "$it ms" } ?: "–")
+                    Stat("Loss", "%.1f%%".format(voice.lossPercent))
+                    Stat("Buffer", "${voice.bufferedMs} ms")
+                    Stat("Gaps", voice.underruns.toString())
+                }
             }
         }
+    }
+}
+
+@Composable
+private fun Stat(label: String, value: String) {
+    Column(horizontalAlignment = Alignment.CenterHorizontally) {
+        Text(value, style = MaterialTheme.typography.titleMedium, fontFamily = FontFamily.Monospace)
+        Text(label, style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
     }
 }
 
@@ -293,20 +346,48 @@ private val previewLink = LinkInfo(
     fallbackReason = null,
 )
 
-@Preview(name = "Rider waiting", showBackground = true, backgroundColor = 0xFF0E1318, heightDp = 800)
+private val previewVoice = VoiceStats(
+    running = true,
+    output = "Bluetooth headset (Helmet BT)",
+    received = 1200,
+    lost = 3,
+    pingMs = 6,
+    bufferedMs = 60,
+    hearingPeer = true,
+)
+
+@Preview(name = "Rider waiting", showBackground = true, backgroundColor = 0xFF0E1318, heightDp = 900)
 @Composable
 private fun RiderWaitingPreview() {
-    PillionTalkTheme { RideScreen(RideState.Connected(previewLink, emptyList()), onEnd = {}, onRetry = {}) }
+    PillionTalkTheme {
+        RideScreen(
+            RideState.Connected(previewLink, emptyList()),
+            voice = previewVoice.copy(hearingPeer = false, pingMs = null),
+            onToggleMute = {}, onEnd = {}, onRetry = {},
+        )
+    }
 }
 
-@Preview(name = "Pillion connected", showBackground = true, backgroundColor = 0xFF0E1318, heightDp = 800)
+@Preview(name = "Pillion talking", showBackground = true, backgroundColor = 0xFF0E1318, heightDp = 900)
 @Composable
-private fun PillionConnectedPreview() {
+private fun PillionTalkingPreview() {
     PillionTalkTheme {
         RideScreen(
             RideState.Connected(previewLink.copy(role = Role.PILLION, myIp = "192.168.49.23"), listOf("Nothing Phone (4a) Pro")),
-            onEnd = {},
-            onRetry = {},
+            voice = previewVoice,
+            onToggleMute = {}, onEnd = {}, onRetry = {},
+        )
+    }
+}
+
+@Preview(name = "Muted", showBackground = true, backgroundColor = 0xFF0E1318, heightDp = 900)
+@Composable
+private fun MutedPreview() {
+    PillionTalkTheme {
+        RideScreen(
+            RideState.Connected(previewLink, listOf("Redmi Note 11 Pro+")),
+            voice = previewVoice.copy(muted = true),
+            onToggleMute = {}, onEnd = {}, onRetry = {},
         )
     }
 }
@@ -315,6 +396,10 @@ private fun PillionConnectedPreview() {
 @Composable
 private fun FailedPreview() {
     PillionTalkTheme {
-        RideScreen(RideState.Failed(Role.PILLION, "Couldn't find your rider's phone. Is it hosting a ride nearby?"), onEnd = {}, onRetry = {})
+        RideScreen(
+            RideState.Failed(Role.PILLION, "Couldn't find your rider's phone. Is it hosting a ride nearby?"),
+            voice = VoiceStats(),
+            onToggleMute = {}, onEnd = {}, onRetry = {},
+        )
     }
 }

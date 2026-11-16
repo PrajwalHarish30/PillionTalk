@@ -35,12 +35,15 @@ import com.prajwal.pilliontalk.ride.RideViewModel
 import com.prajwal.pilliontalk.wifidirect.Role
 import kotlinx.coroutines.launch
 
-/** The runtime permission Wi-Fi Direct needs depends on the Android version (see AndroidManifest.xml). */
-private val wifiDirectPermissions: Array<String> =
+/**
+ * Runtime permissions a ride needs: the microphone, plus Wi-Fi Direct's permission,
+ * which depends on the Android version (see AndroidManifest.xml).
+ */
+private val ridePermissions: Array<String> =
     if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
-        arrayOf(Manifest.permission.NEARBY_WIFI_DEVICES)
+        arrayOf(Manifest.permission.NEARBY_WIFI_DEVICES, Manifest.permission.RECORD_AUDIO)
     } else {
-        arrayOf(Manifest.permission.ACCESS_FINE_LOCATION, Manifest.permission.ACCESS_COARSE_LOCATION)
+        arrayOf(Manifest.permission.ACCESS_FINE_LOCATION, Manifest.permission.ACCESS_COARSE_LOCATION, Manifest.permission.RECORD_AUDIO)
     }
 
 /**
@@ -52,6 +55,7 @@ private val wifiDirectPermissions: Array<String> =
 fun PillionTalkApp(viewModel: RideViewModel = viewModel()) {
     // Like StreamBuilder / ValueListenableBuilder: recomposes whenever the state changes.
     val state by viewModel.state.collectAsStateWithLifecycle()
+    val voice by viewModel.voice.collectAsStateWithLifecycle()
     val context = LocalContext.current
     val snackbar = remember { SnackbarHostState() }
     val scope = rememberCoroutineScope()
@@ -68,19 +72,19 @@ fun PillionTalkApp(viewModel: RideViewModel = viewModel()) {
         if (results.values.all { it } && role != null) {
             viewModel.start(role)
         } else {
-            scope.launch { snackbar.showSnackbar("Pillion Talk needs the Nearby devices permission to connect the phones.") }
+            scope.launch { snackbar.showSnackbar("Pillion Talk needs Nearby devices (to connect) and Microphone (to talk).") }
         }
     }
 
     fun pickRole(role: Role) {
-        val granted = wifiDirectPermissions.all {
+        val granted = ridePermissions.all {
             ContextCompat.checkSelfPermission(context, it) == PackageManager.PERMISSION_GRANTED
         }
         if (granted) {
             viewModel.start(role)
         } else {
             pendingRole = role
-            permissionLauncher.launch(wifiDirectPermissions)
+            permissionLauncher.launch(ridePermissions)
         }
     }
 
@@ -103,6 +107,8 @@ fun PillionTalkApp(viewModel: RideViewModel = viewModel()) {
             if (showRide) {
                 RideScreen(
                     state = state,
+                    voice = voice,
+                    onToggleMute = viewModel::toggleMute,
                     onEnd = viewModel::end,
                     onRetry = viewModel::retry,
                     modifier = Modifier.padding(innerPadding),

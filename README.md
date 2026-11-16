@@ -13,8 +13,9 @@ Phase 1 in progress. The app has a home screen where you pick your seat, and a r
 - **I'm riding** creates a Wi-Fi Direct group (preferring 5 GHz) and waits for the pillion.
 - **I'm the pillion** finds and joins the rider's group.
 - Both screens show live connection status, the band in use, and connection details.
+- **Voice v1:** once connected, both phones stream raw 16 kHz audio to each other over UDP, routed to a Bluetooth headset if one is connected. There's a mute button and live stats: ping, packet loss, buffer and gaps.
 
-Voice is next.
+Next: Opus compression, a foreground service so voice keeps going with the screen off, and auto-reconnect.
 
 ## Stack
 

@@ -34,6 +34,16 @@
         android:usesPermissionFlags="neverForLocation"
         tools:targetApi="33" />
 
+    <!-- Sending and receiving UDP packets uses network sockets, which need INTERNET
+         (the name is historical: no internet is involved, the packets stay on Wi-Fi Direct). -->
+    <uses-permission android:name="android.permission.INTERNET" />
+
+    <!-- The microphone. A runtime permission: the user approves it in a dialog. -->
+    <uses-permission android:name="android.permission.RECORD_AUDIO" />
+
+    <!-- Switch the phone into "call mode" and route audio to the helmet headset. Granted at install. -->
+    <uses-permission android:name="android.permission.MODIFY_AUDIO_SETTINGS" />
+
     <application
         android:allowBackup="true"
         android:icon="@mipmap/ic_launcher"
