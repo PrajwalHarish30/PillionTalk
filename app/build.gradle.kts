@@ -14,8 +14,8 @@ android {
         applicationId = "com.prajwal.pilliontalk" // the app's unique ID on a phone / Play Store
         minSdk = 31     // Android 12: oldest version we install on (both test phones are 12+)
         targetSdk = 36  // the version whose behaviour rules we've tested against
-        versionCode = 6       // must go up with every build you install over an older one
-        versionName = "0.6.0" // what humans see
+        versionCode = 7       // must go up with every build you install over an older one
+        versionName = "0.7.0" // what humans see
     }
 
     // Every APK must be signed, and Android only installs an update over an existing app if
@@ -67,6 +67,7 @@ dependencies {
     implementation(platform(libs.androidx.compose.bom))
     implementation(libs.androidx.compose.ui)
     implementation(libs.androidx.compose.material3)
+    implementation(libs.androidx.compose.material.icons.extended) // mic, headphones, call-end… icons
     implementation(libs.androidx.compose.ui.tooling.preview)
     debugImplementation(libs.androidx.compose.ui.tooling) // @Preview support in Android Studio, debug builds only
 }

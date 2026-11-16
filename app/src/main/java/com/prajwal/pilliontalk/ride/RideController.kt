@@ -1,6 +1,8 @@
 package com.prajwal.pilliontalk.ride
 
 import android.content.Context
+import android.os.SystemClock
+import com.prajwal.pilliontalk.profile.ProfileStore
 import com.prajwal.pilliontalk.voice.VoiceEngine
 import com.prajwal.pilliontalk.voice.VoiceStats
 import com.prajwal.pilliontalk.wifidirect.LinkInfo
@@ -31,10 +33,10 @@ sealed interface RideState {
     data class Connecting(val role: Role) : RideState
 
     /**
-     * The link is up. [peers] is who's on the other end: for the rider, empty until the
-     * pillion joins.
+     * The link is up. [peers] is who's on the other end (device names): for the rider, empty
+     * until the pillion joins. [since] is when the link came up, for the ride timer.
      */
-    data class Connected(val link: LinkInfo, val peers: List<String>) : RideState {
+    data class Connected(val link: LinkInfo, val peers: List<String>, val since: Long) : RideState {
         val paired: Boolean get() = peers.isNotEmpty()
     }
 
@@ -44,14 +46,14 @@ sealed interface RideState {
 /**
  * Owns the ride: starts it, watches it, ends it.
  *
- * Why not keep this in the ViewModel any more? A ViewModel belongs to a screen. When the app
- * goes to the background, Android may destroy the screen, and the ride would die with it.
- * This object belongs to the whole app instead (one instance, created by PillionTalkApplication),
- * and RideService keeps the app process alive while a ride is running. The screen just watches.
+ * Why not keep this in the ViewModel? A ViewModel belongs to a screen. When the app goes to the
+ * background, Android may destroy the screen, and the ride would die with it. This object
+ * belongs to the whole app instead (one instance, created by PillionTalkApplication), and
+ * RideService keeps the app process alive while a ride is running. The screen just watches.
  *
  * Flutter equivalent: a top-level service object (like a Riverpod provider outside the widget tree).
  */
-class RideController(context: Context) {
+class RideController(context: Context, private val profile: ProfileStore) {
 
     private val link = WifiDirectLink(context)
     private val voiceEngine = VoiceEngine(context)
@@ -62,7 +64,7 @@ class RideController(context: Context) {
     private val _state = MutableStateFlow<RideState>(RideState.Idle)
     val state: StateFlow<RideState> = _state.asStateFlow()
 
-    /** Live voice numbers (ping, loss, buffer, volume…). */
+    /** Live voice info (who's speaking, volume, output, stats…). */
     val voice: StateFlow<VoiceStats> = voiceEngine.stats
 
     private var rideJob: Job? = null
@@ -73,7 +75,6 @@ class RideController(context: Context) {
         // when it starts up and stops itself by mistake.
         _state.value = RideState.Connecting(role)
         rideJob = scope.launch {
-
             val info = try {
                 if (role == Role.RIDER) link.host() else link.join()
             } catch (e: CancellationException) {
@@ -83,39 +84,56 @@ class RideController(context: Context) {
                 return@launch
             }
 
-            _state.value = RideState.Connected(info, peers = link.peers(role).orEmpty())
+            val since = SystemClock.elapsedRealtime()
+            _state.value = RideState.Connected(info, peers = link.peers(role).orEmpty(), since = since)
 
             // Start voice straight away. The pillion knows the rider's address; the rider
             // waits for the pillion's first packet to learn theirs.
             withContext(Dispatchers.IO) {
-                voiceEngine.start(peerIp = if (role == Role.PILLION) info.hostIp else null)
+                voiceEngine.start(
+                    peerIp = if (role == Role.PILLION) info.hostIp else null,
+                    name = profile.name.value.ifBlank { android.os.Build.MODEL },
+                )
             }
-            watch(info)
+            watch(info, since)
         }
     }
 
     /** Every 2 seconds, check who's connected, and notice if the link drops. */
-    private suspend fun watch(info: LinkInfo) {
+    private suspend fun watch(info: LinkInfo, since: Long) {
         while (scope.isActive) {
             delay(2_000)
             val peers = link.peers(info.role)
             if (peers == null) {
+                val who = voice.value.peerName ?: if (info.role == Role.RIDER) "Your pillion" else "Your rider"
                 stopVoice()
-                val who = if (info.role == Role.RIDER) "The ride network" else "The connection to your rider"
-                _state.value = RideState.Failed(info.role, "$who was lost.")
+                _state.value = RideState.Failed(info.role, "$who took a detour. The connection was lost.")
                 return
             }
-            _state.value = RideState.Connected(info, peers)
+            _state.value = RideState.Connected(info, peers, since)
         }
     }
 
     fun toggleMute() = voiceEngine.setMuted(!voice.value.muted)
 
+    fun togglePeerSilenced() = voiceEngine.setPeerSilenced(!voice.value.peerSilenced)
+
     fun selectOutput(id: Int) = voiceEngine.selectOutput(id)
 
-    fun setVolume(fraction: Float) = voiceEngine.setVolume(fraction)
+    /** Switch between the headset/earpiece and the loudspeaker (for the notification button). */
+    fun toggleSpeaker() {
+        val stats = voice.value
+        val onSpeaker = stats.output?.kind == com.prajwal.pilliontalk.voice.OutputKind.SPEAKER
+        val target = if (onSpeaker) {
+            stats.outputs.firstOrNull { it.kind != com.prajwal.pilliontalk.voice.OutputKind.SPEAKER }
+        } else {
+            stats.outputs.firstOrNull { it.kind == com.prajwal.pilliontalk.voice.OutputKind.SPEAKER }
+        }
+        target?.let { voiceEngine.selectOutput(it.id) }
+    }
 
-    fun setBoost(on: Boolean) = voiceEngine.setBoost(on)
+    /** 0.0–2.0: up to 1.0 is the phone's volume, above that is boost. */
+    fun setVolume(level: Float) = voiceEngine.setVolume(level)
 
     fun end() {
         rideJob?.cancel()

@@ -1,15 +1,6 @@
 package com.prajwal.pilliontalk.ride
 
-import androidx.compose.animation.AnimatedVisibility
-import androidx.compose.animation.animateColorAsState
-import androidx.compose.animation.core.LinearEasing
-import androidx.compose.animation.core.RepeatMode
-import androidx.compose.animation.core.animateFloat
-import androidx.compose.animation.core.infiniteRepeatable
-import androidx.compose.animation.core.rememberInfiniteTransition
-import androidx.compose.animation.core.tween
-import androidx.compose.foundation.BorderStroke
-import androidx.compose.foundation.Canvas
+import android.os.SystemClock
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
@@ -20,38 +11,52 @@ import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
-import androidx.compose.foundation.horizontalScroll
-import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
-import androidx.compose.foundation.verticalScroll
+import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.rounded.BluetoothAudio
+import androidx.compose.material.icons.rounded.CallEnd
+import androidx.compose.material.icons.rounded.Check
+import androidx.compose.material.icons.rounded.Headphones
+import androidx.compose.material.icons.outlined.Info
+import androidx.compose.material.icons.rounded.KeyboardArrowUp
+import androidx.compose.material.icons.rounded.Mic
+import androidx.compose.material.icons.rounded.MicOff
+import androidx.compose.material.icons.rounded.PhoneAndroid
+import androidx.compose.material.icons.rounded.Usb
+import androidx.compose.material.icons.automirrored.rounded.VolumeOff
+import androidx.compose.material.icons.automirrored.rounded.VolumeUp
 import androidx.compose.material3.Button
-import androidx.compose.material3.ButtonDefaults
-import androidx.compose.material3.FilterChip
-import androidx.compose.material3.FilterChipDefaults
+import androidx.compose.material3.DropdownMenu
+import androidx.compose.material3.DropdownMenuItem
+import androidx.compose.material3.ExperimentalMaterial3Api
+import androidx.compose.material3.HorizontalDivider
+import androidx.compose.material3.Icon
 import androidx.compose.material3.MaterialTheme
+import androidx.compose.material3.ModalBottomSheet
 import androidx.compose.material3.OutlinedButton
-import androidx.compose.material3.Slider
-import androidx.compose.material3.SliderDefaults
-import androidx.compose.material3.Switch
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
-import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.produceState
+import androidx.compose.runtime.remember
 import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
-import androidx.compose.ui.graphics.drawscope.Stroke
+import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.tooling.preview.Preview
 import androidx.compose.ui.unit.dp
-import androidx.compose.ui.unit.sp
-import com.prajwal.pilliontalk.ui.theme.PillionColors
+import com.prajwal.pilliontalk.profile.initialsOf
+import com.prajwal.pilliontalk.ui.components.Avatar
+import com.prajwal.pilliontalk.ui.components.SectionLabel
+import com.prajwal.pilliontalk.ui.components.VolumeSlider
 import com.prajwal.pilliontalk.ui.theme.PillionTalkTheme
 import com.prajwal.pilliontalk.voice.AudioOutput
 import com.prajwal.pilliontalk.voice.OutputKind
@@ -59,440 +64,383 @@ import com.prajwal.pilliontalk.voice.VoiceStats
 import com.prajwal.pilliontalk.wifidirect.Band
 import com.prajwal.pilliontalk.wifidirect.LinkInfo
 import com.prajwal.pilliontalk.wifidirect.Role
+import kotlinx.coroutines.delay
+
+/** Everything the ride screen can ask for. Grouped so the screen's signature stays readable. */
+class RideActions(
+    val onToggleMute: () -> Unit = {},
+    val onTogglePeerSilenced: () -> Unit = {},
+    val onSelectOutput: (Int) -> Unit = {},
+    val onVolumeChange: (Float) -> Unit = {},
+    val onEnd: () -> Unit = {},
+    val onRetry: () -> Unit = {},
+)
 
 /**
- * The screen you see during a ride, for both seats. It's "stateless": give it a state and
- * two callbacks, and it draws. That's what lets the previews at the bottom show every state.
+ * The ride screen. Layout borrowed from voice-call apps:
+ *   header      "Ride · 42:10" and the band
+ *   status      the fun line ("Yapping at full throttle") and the facts under it
+ *   tiles       you and the other person; a ring lights up around whoever is talking
+ *   control bar mic · output (dropdown, with volume) · details · end
+ *
+ * It's "stateless": give it state and callbacks and it draws. The sheets' open/closed flags are
+ * the only state it keeps itself.
  */
+@OptIn(ExperimentalMaterial3Api::class)
 @Composable
 fun RideScreen(
     state: RideState,
     voice: VoiceStats,
-    onToggleMute: () -> Unit,
-    onSelectOutput: (Int) -> Unit,
-    onVolumeChange: (Float) -> Unit,
-    onBoostChange: (Boolean) -> Unit,
-    onEnd: () -> Unit,
-    onRetry: () -> Unit,
+    myName: String,
+    actions: RideActions,
     modifier: Modifier = Modifier,
 ) {
-    // Turn the state into what to show. A `when` over a sealed type must cover every case.
-    val role = when (state) {
-        RideState.Idle -> Role.RIDER
-        is RideState.Connecting -> state.role
-        is RideState.Connected -> state.link.role
-        is RideState.Failed -> state.role
+    var showPeerSheet by rememberSaveable { mutableStateOf(false) }
+    var showDetails by rememberSaveable { mutableStateOf(false) }
+
+    Column(modifier.fillMaxSize().padding(horizontal = 20.dp, vertical = 16.dp)) {
+        Header(state)
+
+        Spacer(Modifier.height(20.dp))
+        Text(RideCopy.title(state, voice), style = MaterialTheme.typography.headlineMedium)
+        val subtitle = RideCopy.subtitle(state, voice)
+        if (subtitle.isNotEmpty()) {
+            Text(subtitle, style = MaterialTheme.typography.bodyLarge, color = MaterialTheme.colorScheme.onSurfaceVariant)
+        }
+
+        Spacer(Modifier.height(24.dp))
+        Tiles(state, voice, myName, onPeerClick = { showPeerSheet = true })
+
+        if (state is RideState.Failed) {
+            Spacer(Modifier.height(20.dp))
+            Button(onClick = actions.onRetry, modifier = Modifier.fillMaxWidth().height(52.dp)) { Text("Try again") }
+        }
+
+        Spacer(Modifier.weight(1f))
+        ControlBar(state, voice, actions, onDetails = { showDetails = true })
     }
-    val status = statusFor(state)
 
-    Column(
-        modifier = modifier.fillMaxSize().padding(horizontal = 20.dp, vertical = 16.dp),
-        horizontalAlignment = Alignment.CenterHorizontally,
-    ) {
-        RoleBadge(role)
+    val connected = state as? RideState.Connected
+    if (showPeerSheet && connected != null && connected.paired) {
+        ModalBottomSheet(onDismissRequest = { showPeerSheet = false }) {
+            PeerSheet(connected, voice, actions)
+        }
+    }
+    if (showDetails && connected != null) {
+        ModalBottomSheet(onDismissRequest = { showDetails = false }) {
+            DetailsSheet(connected.link, voice)
+        }
+    }
+}
 
-        // The middle scrolls if a small screen can't fit the details card.
-        Column(
-            modifier = Modifier.weight(1f).fillMaxWidth().verticalScroll(rememberScrollState()),
-            horizontalAlignment = Alignment.CenterHorizontally,
-            verticalArrangement = Arrangement.spacedBy(16.dp, Alignment.CenterVertically),
-        ) {
-            Spacer(Modifier.height(8.dp))
-            StatusHalo(emoji = if (role == Role.RIDER) "🏍️" else "🎧", color = status.color, pulsing = status.pulsing)
-            Text(status.title, style = MaterialTheme.typography.headlineMedium, textAlign = TextAlign.Center)
+/** "Ride · 42:10" on the left, the band on the right. The timer ticks once a second. */
+@Composable
+private fun Header(state: RideState) {
+    // produceState: a value that a coroutine keeps updating (Flutter: a StreamBuilder over a timer).
+    val now by produceState(SystemClock.elapsedRealtime()) {
+        while (true) {
+            delay(1_000)
+            value = SystemClock.elapsedRealtime()
+        }
+    }
+    val connected = state as? RideState.Connected
+    Row(verticalAlignment = Alignment.CenterVertically) {
+        Text(
+            if (connected != null) "Ride · ${formatDuration((now - connected.since) / 1000)}" else "Ride",
+            style = MaterialTheme.typography.titleMedium,
+            modifier = Modifier.weight(1f),
+        )
+        if (connected != null) {
             Text(
-                status.subtitle,
-                style = MaterialTheme.typography.bodyLarge,
+                connected.link.band.label,
+                style = MaterialTheme.typography.bodyMedium,
                 color = MaterialTheme.colorScheme.onSurfaceVariant,
-                textAlign = TextAlign.Center,
             )
-
-            if (state is RideState.Connected) {
-                BandChip(state.link)
-                VoicePanel(voice, onToggleMute, onSelectOutput, onVolumeChange, onBoostChange)
-                ConnectionDetails(state.link)
-            }
-            if (state is RideState.Failed) {
-                Button(onClick = onRetry) { Text("Try again") }
-            }
-        }
-
-        // Big, always-visible way out. Easy to hit with gloves.
-        OutlinedButton(
-            onClick = onEnd,
-            modifier = Modifier.fillMaxWidth().height(56.dp),
-            shape = RoundedCornerShape(16.dp),
-            border = BorderStroke(1.dp, PillionColors.Bad.copy(alpha = 0.6f)),
-            colors = ButtonDefaults.outlinedButtonColors(contentColor = PillionColors.Bad),
-        ) {
-            Text(if (state is RideState.Failed) "Back" else "End ride", style = MaterialTheme.typography.titleMedium)
         }
     }
 }
 
-/** Title, subtitle and colour for each state, worded for each seat. */
-private data class Status(val title: String, val subtitle: String, val color: Color, val pulsing: Boolean)
-
-private fun statusFor(state: RideState): Status = when (state) {
-    RideState.Idle -> Status("", "", PillionColors.TextSecondary, pulsing = false)
-
-    is RideState.Connecting -> when (state.role) {
-        Role.RIDER -> Status("Starting your ride…", "Creating a private Wi-Fi Direct network", PillionColors.Amber, pulsing = true)
-        Role.PILLION -> Status("Looking for your rider…", "Make sure their phone has started a ride", PillionColors.Amber, pulsing = true)
-    }
-
-    is RideState.Connected -> when {
-        state.link.role == Role.RIDER && !state.paired ->
-            Status("Waiting for your pillion", "Ask them to open Pillion Talk and tap \"I'm the pillion\"", PillionColors.Amber, pulsing = true)
-        state.link.role == Role.RIDER ->
-            Status("Pillion connected", state.peers.joinToString(), PillionColors.Good, pulsing = false)
-        else ->
-            Status("Connected to your rider", state.peers.joinToString(), PillionColors.Good, pulsing = false)
-    }
-
-    is RideState.Failed -> Status("Couldn't connect", state.message, PillionColors.Bad, pulsing = false)
-}
-
+/** Two tiles, you and them. */
 @Composable
-private fun RoleBadge(role: Role) {
-    Surface(
-        shape = CircleShape,
-        color = MaterialTheme.colorScheme.surfaceVariant,
-        contentColor = MaterialTheme.colorScheme.onSurfaceVariant,
-    ) {
-        Text(
-            if (role == Role.RIDER) "RIDER" else "PILLION",
-            style = MaterialTheme.typography.labelLarge,
-            modifier = Modifier.padding(horizontal = 14.dp, vertical = 6.dp),
-        )
-    }
-}
+private fun Tiles(state: RideState, voice: VoiceStats, myName: String, onPeerClick: () -> Unit) {
+    val connected = state as? RideState.Connected
+    val paired = connected?.paired == true
+    val peerName = voice.peerName
 
-/**
- * A circle with the seat's emoji, plus expanding rings while we're waiting for something.
- * rememberInfiniteTransition ≈ an AnimationController with ..repeat() in Flutter.
- */
-@Composable
-private fun StatusHalo(emoji: String, color: Color, pulsing: Boolean) {
-    // Smoothly fade between colours when the state changes (amber → green, etc.).
-    val animatedColor by animateColorAsState(color, label = "haloColor")
-    val transition = rememberInfiniteTransition(label = "halo")
-    val progress by transition.animateFloat(
-        initialValue = 0f,
-        targetValue = 1f,
-        animationSpec = infiniteRepeatable(tween(1800, easing = LinearEasing), RepeatMode.Restart),
-        label = "haloProgress",
-    )
-
-    Box(Modifier.size(200.dp), contentAlignment = Alignment.Center) {
-        if (pulsing) {
-            // Canvas ≈ Flutter's CustomPaint. Two rings, half a cycle apart, growing and fading.
-            Canvas(Modifier.fillMaxSize()) {
-                listOf(progress, (progress + 0.5f) % 1f).forEach { p ->
-                    drawCircle(
-                        color = animatedColor.copy(alpha = (1f - p) * 0.5f),
-                        radius = size.minDimension / 2 * (0.5f + 0.5f * p),
-                        style = Stroke(width = 3.dp.toPx()),
-                    )
-                }
-            }
-        }
-        Surface(
-            shape = CircleShape,
-            color = animatedColor.copy(alpha = 0.15f),
-            border = BorderStroke(3.dp, animatedColor),
-            modifier = Modifier.size(104.dp),
-        ) {
-            Box(contentAlignment = Alignment.Center) { Text(emoji, fontSize = 44.sp) }
-        }
-    }
-}
-
-/** Green when we got 5 GHz (no fight with the headset's Bluetooth), amber otherwise. */
-@Composable
-private fun BandChip(link: LinkInfo) {
-    val good = link.band == Band.GHZ_5 || link.band == Band.GHZ_6
-    val color = if (good) PillionColors.Good else PillionColors.Warn
-    Surface(
-        shape = CircleShape,
-        color = color.copy(alpha = 0.14f),
-        contentColor = color,
-        border = BorderStroke(1.dp, color.copy(alpha = 0.5f)),
-    ) {
-        Text(
-            if (good) "${link.band.label} · clear of Bluetooth" else "${link.band.label} · may interfere with Bluetooth",
-            style = MaterialTheme.typography.labelLarge,
-            modifier = Modifier.padding(horizontal = 14.dp, vertical = 8.dp),
-        )
-    }
-}
-
-/**
- * The talk controls: where audio is going, a big mute button, and live link quality.
- */
-@Composable
-private fun VoicePanel(
-    voice: VoiceStats,
-    onToggleMute: () -> Unit,
-    onSelectOutput: (Int) -> Unit,
-    onVolumeChange: (Float) -> Unit,
-    onBoostChange: (Boolean) -> Unit,
-) {
-    Surface(
-        shape = RoundedCornerShape(20.dp),
-        color = MaterialTheme.colorScheme.surfaceVariant,
-        modifier = Modifier.fillMaxWidth(),
-    ) {
-        Column(Modifier.padding(16.dp), verticalArrangement = Arrangement.spacedBy(14.dp)) {
-            Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(14.dp)) {
-                Text(if (voice.muted) "🔇" else "🎙️", fontSize = 28.sp)
-                Column(Modifier.weight(1f)) {
-                    Text(
-                        when {
-                            voice.error != null -> "Voice problem"
-                            !voice.running -> "Voice starting…"
-                            voice.hearingPeer -> "Talking"
-                            else -> "Waiting for the other phone"
-                        },
-                        style = MaterialTheme.typography.titleMedium,
-                    )
-                    Text(
-                        voice.error ?: voice.output?.let { "Audio: ${it.label}" } ?: "Choosing audio output…",
-                        style = MaterialTheme.typography.bodyMedium,
-                        color = if (voice.error != null) PillionColors.Bad else MaterialTheme.colorScheme.onSurfaceVariant,
-                    )
-                }
-            }
-
-            if (voice.outputs.isNotEmpty()) {
-                OutputPicker(voice.outputs, voice.output, onSelectOutput)
-            }
-            if (voice.output?.kind == OutputKind.SPEAKER) {
-                Text(
-                    "On speaker, keep the phones apart or you'll get echo and howling.",
-                    style = MaterialTheme.typography.bodySmall,
-                    color = PillionColors.Warn,
+    Row(horizontalArrangement = Arrangement.spacedBy(10.dp)) {
+        Tile(
+            label = "You",
+            avatar = {
+                Avatar(
+                    initials = initialsOf(myName.ifBlank { "You" }),
+                    size = 64.dp,
+                    speaking = voice.meSpeaking,
+                    badge = if (voice.muted) Icons.Rounded.MicOff else null,
                 )
-            }
+            },
+            modifier = Modifier.weight(1f),
+        )
+        Tile(
+            label = when {
+                paired -> peerName ?: "Connecting…"
+                state is RideState.Failed -> "Lost"
+                else -> "Waiting…"
+            },
+            avatar = {
+                Avatar(
+                    initials = if (paired && peerName != null) initialsOf(peerName) else "?",
+                    size = 64.dp,
+                    speaking = paired && voice.peerSpeaking && !voice.peerSilenced,
+                    waiting = !paired,
+                    badge = if (voice.peerSilenced) Icons.AutoMirrored.Rounded.VolumeOff else null,
+                )
+            },
+            onClick = if (paired) onPeerClick else null,
+            modifier = Modifier.weight(1f),
+        )
+    }
+}
 
-            if (voice.running) {
-                VolumeControl(voice.volume, voice.boost, onVolumeChange, onBoostChange)
-            }
+@Composable
+private fun Tile(label: String, avatar: @Composable () -> Unit, modifier: Modifier = Modifier, onClick: (() -> Unit)? = null) {
+    val content: @Composable () -> Unit = {
+        Column(
+            Modifier.fillMaxWidth().padding(vertical = 22.dp),
+            horizontalAlignment = Alignment.CenterHorizontally,
+            verticalArrangement = Arrangement.spacedBy(10.dp),
+        ) {
+            avatar()
+            Text(label, style = MaterialTheme.typography.bodyMedium, maxLines = 1)
+        }
+    }
+    val shape = RoundedCornerShape(20.dp)
+    if (onClick != null) {
+        Surface(onClick = onClick, shape = shape, color = MaterialTheme.colorScheme.surface, modifier = modifier) { content() }
+    } else {
+        Surface(shape = shape, color = MaterialTheme.colorScheme.surface, modifier = modifier) { content() }
+    }
+}
 
-            // Big mute toggle. Amber when you're live, red when muted, so it's obvious at a glance.
-            Button(
-                onClick = onToggleMute,
-                enabled = voice.running,
-                modifier = Modifier.fillMaxWidth().height(56.dp),
-                shape = RoundedCornerShape(16.dp),
-                colors = if (voice.muted) {
-                    ButtonDefaults.buttonColors(containerColor = PillionColors.Bad, contentColor = Color.Black)
-                } else {
-                    ButtonDefaults.buttonColors()
-                },
-            ) {
-                Text(if (voice.muted) "Muted · tap to talk" else "Mute my mic", style = MaterialTheme.typography.titleMedium)
-            }
+/** Mic · output · details · end. Big round targets for gloves. */
+@Composable
+private fun ControlBar(state: RideState, voice: VoiceStats, actions: RideActions, onDetails: () -> Unit) {
+    var outputMenuOpen by remember { mutableStateOf(false) }
+    val live = voice.running
 
-            if (voice.running) {
-                Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween) {
-                    Stat("Ping", voice.pingMs?.let { "$it ms" } ?: "–")
-                    Stat("Loss", "%.1f%%".format(voice.lossPercent))
-                    Stat("Buffer", "${voice.bufferedMs} ms")
-                    Stat("Gaps", voice.underruns.toString())
+    Surface(shape = RoundedCornerShape(28.dp), color = MaterialTheme.colorScheme.surface, modifier = Modifier.fillMaxWidth()) {
+        Row(
+            Modifier.padding(10.dp),
+            verticalAlignment = Alignment.CenterVertically,
+            horizontalArrangement = Arrangement.SpaceBetween,
+        ) {
+            RoundButton(
+                icon = if (voice.muted) Icons.Rounded.MicOff else Icons.Rounded.Mic,
+                description = if (voice.muted) "Unmute" else "Mute",
+                onClick = actions.onToggleMute,
+                enabled = live,
+                // Muted is the one state worth flagging loudly: invert the button.
+                inverted = voice.muted,
+            )
+
+            // The output pill opens a dropdown anchored to it: outputs, then the volume slider.
+            Box {
+                Surface(
+                    onClick = { outputMenuOpen = true },
+                    enabled = live,
+                    shape = RoundedCornerShape(28.dp),
+                    color = MaterialTheme.colorScheme.surfaceVariant,
+                ) {
+                    Row(
+                        Modifier.height(56.dp).padding(horizontal = 18.dp),
+                        verticalAlignment = Alignment.CenterVertically,
+                        horizontalArrangement = Arrangement.spacedBy(6.dp),
+                    ) {
+                        Icon(iconFor(voice.output?.kind), contentDescription = "Audio output")
+                        Icon(Icons.Rounded.KeyboardArrowUp, contentDescription = null, modifier = Modifier.size(18.dp))
+                    }
+                }
+                DropdownMenu(
+                    expanded = outputMenuOpen,
+                    onDismissRequest = { outputMenuOpen = false },
+                    shape = RoundedCornerShape(16.dp),
+                    containerColor = MaterialTheme.colorScheme.surfaceContainerHigh,
+                ) {
+                    SectionLabel("Output", Modifier.padding(horizontal = 16.dp, vertical = 8.dp))
+                    voice.outputs.forEach { output ->
+                        DropdownMenuItem(
+                            text = { Text(labelFor(output)) },
+                            leadingIcon = { Icon(iconFor(output.kind), contentDescription = null) },
+                            trailingIcon = {
+                                if (output.id == voice.output?.id) Icon(Icons.Rounded.Check, contentDescription = "Selected")
+                            },
+                            onClick = {
+                                actions.onSelectOutput(output.id)
+                                outputMenuOpen = false
+                            },
+                        )
+                    }
+                    HorizontalDivider(Modifier.padding(vertical = 6.dp))
+                    VolumeSlider(
+                        value = voice.volume,
+                        onValueChange = actions.onVolumeChange,
+                        modifier = Modifier.width(260.dp).padding(horizontal = 16.dp, vertical = 6.dp),
+                    )
                 }
             }
-        }
-    }
-}
 
-/**
- * One chip per available output. FilterChip is Material's "pick one of these" chip
- * (Flutter: ChoiceChip). It scrolls sideways if there are too many to fit.
- */
-@Composable
-private fun OutputPicker(outputs: List<AudioOutput>, current: AudioOutput?, onSelect: (Int) -> Unit) {
-    Row(
-        modifier = Modifier.fillMaxWidth().horizontalScroll(rememberScrollState()),
-        horizontalArrangement = Arrangement.spacedBy(8.dp),
-    ) {
-        outputs.forEach { output ->
-            val selected = output.kind == current?.kind && output.label == current.label
-            FilterChip(
-                selected = selected,
-                onClick = { onSelect(output.id) },
-                label = { Text("${output.kind.emoji}  ${output.label}", maxLines = 1) },
-                colors = FilterChipDefaults.filterChipColors(
-                    selectedContainerColor = MaterialTheme.colorScheme.primary,
-                    selectedLabelColor = MaterialTheme.colorScheme.onPrimary,
-                ),
+            RoundButton(icon = Icons.Outlined.Info, description = "Connection details", onClick = onDetails, enabled = state is RideState.Connected)
+
+            RoundButton(
+                icon = Icons.Rounded.CallEnd,
+                description = "End ride",
+                onClick = actions.onEnd,
+                container = MaterialTheme.colorScheme.error,
+                contentColor = MaterialTheme.colorScheme.onError,
             )
         }
     }
 }
 
-/**
- * How loud the other person is. The slider is the phone's call volume (the volume buttons move
- * it too). Boost goes past the phone's maximum for loud roads.
- */
 @Composable
-private fun VolumeControl(
-    volume: Float,
-    boost: Boolean,
-    onVolumeChange: (Float) -> Unit,
-    onBoostChange: (Boolean) -> Unit,
+private fun RoundButton(
+    icon: ImageVector,
+    description: String,
+    onClick: () -> Unit,
+    enabled: Boolean = true,
+    inverted: Boolean = false,
+    container: Color = if (inverted) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.surfaceVariant,
+    contentColor: Color = if (inverted) MaterialTheme.colorScheme.onPrimary else MaterialTheme.colorScheme.onSurface,
 ) {
-    Column {
-        Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(12.dp)) {
-            Text("🔈", fontSize = 18.sp)
-            Slider(
-                value = volume,
-                onValueChange = onVolumeChange,
-                modifier = Modifier.weight(1f),
-                colors = SliderDefaults.colors(
-                    thumbColor = MaterialTheme.colorScheme.primary,
-                    activeTrackColor = MaterialTheme.colorScheme.primary,
-                ),
-            )
-            Text("🔊", fontSize = 18.sp)
-        }
-        Row(verticalAlignment = Alignment.CenterVertically) {
-            Column(Modifier.weight(1f)) {
-                Text("Boost", style = MaterialTheme.typography.titleSmall)
+    Surface(
+        onClick = onClick,
+        enabled = enabled,
+        shape = CircleShape,
+        color = container,
+        contentColor = contentColor,
+        modifier = Modifier.size(56.dp),
+    ) {
+        Box(contentAlignment = Alignment.Center) { Icon(icon, contentDescription = description) }
+    }
+}
+
+/** Tapping the other person's tile: their volume, and "silence them". */
+@Composable
+private fun PeerSheet(state: RideState.Connected, voice: VoiceStats, actions: RideActions) {
+    val name = voice.peerName ?: if (state.link.role == Role.RIDER) "Your pillion" else "Your rider"
+    Column(Modifier.padding(start = 24.dp, end = 24.dp, bottom = 32.dp), verticalArrangement = Arrangement.spacedBy(20.dp)) {
+        Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(14.dp)) {
+            Avatar(initials = initialsOf(name), size = 52.dp, speaking = voice.peerSpeaking && !voice.peerSilenced)
+            Column {
+                Text(name, style = MaterialTheme.typography.titleLarge)
                 Text(
-                    "Louder than max, for wind and engine noise",
-                    style = MaterialTheme.typography.bodySmall,
+                    when {
+                        voice.peerSilenced -> "Silenced"
+                        voice.weakSignal -> "Signal's thinning out"
+                        voice.peerSpeaking -> "Talking"
+                        else -> "Quiet"
+                    },
+                    style = MaterialTheme.typography.bodyMedium,
                     color = MaterialTheme.colorScheme.onSurfaceVariant,
                 )
             }
-            Switch(checked = boost, onCheckedChange = onBoostChange)
+        }
+        VolumeSlider(value = voice.volume, onValueChange = actions.onVolumeChange)
+        OutlinedButton(onClick = actions.onTogglePeerSilenced, modifier = Modifier.fillMaxWidth().height(52.dp)) {
+            Icon(if (voice.peerSilenced) Icons.AutoMirrored.Rounded.VolumeUp else Icons.AutoMirrored.Rounded.VolumeOff, contentDescription = null)
+            Spacer(Modifier.width(8.dp))
+            Text(if (voice.peerSilenced) "Hear them again" else "Silence them")
         }
     }
 }
 
+/** The numbers, for the curious (and for debugging voice quality). */
 @Composable
-private fun Stat(label: String, value: String) {
-    Column(horizontalAlignment = Alignment.CenterHorizontally) {
-        Text(value, style = MaterialTheme.typography.titleMedium, fontFamily = FontFamily.Monospace)
-        Text(label, style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+private fun DetailsSheet(link: LinkInfo, voice: VoiceStats) {
+    val quality = when {
+        voice.weakSignal -> "Weak"
+        voice.lossPercent < 1 && (voice.pingMs ?: 0) < 60 -> "Excellent"
+        else -> "Good"
     }
-}
-
-/** Tap to expand the nerdy details. rememberSaveable keeps it open across screen rotation. */
-@Composable
-private fun ConnectionDetails(link: LinkInfo) {
-    var expanded by rememberSaveable { mutableStateOf(false) }
-    Surface(
-        shape = RoundedCornerShape(20.dp),
-        color = MaterialTheme.colorScheme.surface,
-        border = BorderStroke(1.dp, MaterialTheme.colorScheme.outline),
-        modifier = Modifier.fillMaxWidth(),
-    ) {
-        Column(Modifier.padding(horizontal = 16.dp, vertical = 4.dp)) {
-            TextButton(onClick = { expanded = !expanded }, modifier = Modifier.fillMaxWidth()) {
-                Text(if (expanded) "Hide connection details" else "Show connection details")
-            }
-            AnimatedVisibility(expanded) {
-                Column(Modifier.padding(bottom = 12.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
-                    DetailRow("Network", link.networkName)
-                    DetailRow("Frequency", "${link.frequencyMhz} MHz")
-                    DetailRow("This phone", link.myIp ?: "?")
-                    DetailRow("Rider's phone", link.hostIp ?: "?")
-                    DetailRow("Interface", link.interfaceName ?: "?")
-                    link.fallbackReason?.let {
-                        Text(
-                            "Why not 5 GHz: $it",
-                            style = MaterialTheme.typography.bodySmall,
-                            color = PillionColors.Warn,
-                        )
-                    }
-                }
-            }
+    Column(Modifier.padding(start = 24.dp, end = 24.dp, bottom = 32.dp), verticalArrangement = Arrangement.spacedBy(12.dp)) {
+        Text("Connection details", style = MaterialTheme.typography.titleLarge)
+        DetailRow("Signal", quality)
+        DetailRow("Band", "${link.band.label} · ${link.frequencyMhz} MHz")
+        if (link.band != Band.GHZ_5 && link.band != Band.GHZ_6) {
+            Text(
+                "2.4 GHz can interfere with Bluetooth headsets. ${link.fallbackReason ?: ""}",
+                style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+            )
         }
+        DetailRow("Ping", voice.pingMs?.let { "$it ms" } ?: "–")
+        DetailRow("Packet loss", "%.1f%%".format(voice.lossPercent))
+        DetailRow("Buffer · gaps", "${voice.bufferedMs} ms · ${voice.underruns}")
+        DetailRow("Output", voice.output?.let(::labelFor) ?: "–")
+        DetailRow("This phone", link.myIp ?: "?")
+        DetailRow("Rider's phone", link.hostIp ?: "?")
     }
 }
 
 @Composable
 private fun DetailRow(label: String, value: String) {
-    Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween) {
-        Text(label, style = MaterialTheme.typography.bodyMedium, color = MaterialTheme.colorScheme.onSurfaceVariant)
-        Text(value, style = MaterialTheme.typography.bodyMedium, fontFamily = FontFamily.Monospace)
+    Row(Modifier.fillMaxWidth()) {
+        Text(label, style = MaterialTheme.typography.bodyLarge, color = MaterialTheme.colorScheme.onSurfaceVariant, modifier = Modifier.weight(1f))
+        Text(value, style = MaterialTheme.typography.bodyLarge, fontFamily = FontFamily.Monospace, textAlign = TextAlign.End)
     }
 }
 
-// --- Previews: every state, without a phone ---------------------------------------------------
+private fun iconFor(kind: OutputKind?): ImageVector = when (kind) {
+    OutputKind.BLUETOOTH -> Icons.Rounded.BluetoothAudio
+    OutputKind.WIRED -> Icons.Rounded.Usb
+    OutputKind.EARPIECE -> Icons.Rounded.PhoneAndroid
+    OutputKind.SPEAKER -> Icons.AutoMirrored.Rounded.VolumeUp
+    null -> Icons.Rounded.Headphones
+}
 
-private val previewLink = LinkInfo(
-    role = Role.RIDER,
-    networkName = "DIRECT-PT-PillionTalk",
-    frequencyMhz = 5745,
-    hostIp = "192.168.49.1",
-    myIp = "192.168.49.1",
-    interfaceName = "p2p-wlan0-0",
-    fallbackReason = null,
-)
+private fun labelFor(output: AudioOutput): String = when (output.kind) {
+    OutputKind.EARPIECE -> "Phone earpiece"
+    else -> output.label
+}
 
-private val previewHeadset = AudioOutput(1, OutputKind.BLUETOOTH, "Helmet BT")
+// --- Previews: see states without a phone -----------------------------------------------------
 
+private val previewLink = LinkInfo(Role.RIDER, "DIRECT-PT-PillionTalk", 5745, "192.168.49.1", "192.168.49.1", "p2p-wlan0-0", null)
 private val previewVoice = VoiceStats(
     running = true,
-    outputs = listOf(
-        previewHeadset,
-        AudioOutput(2, OutputKind.EARPIECE, "Phone"),
-        AudioOutput(3, OutputKind.SPEAKER, "Speaker"),
-    ),
-    output = previewHeadset,
-    received = 1200,
-    lost = 3,
+    peerName = "Prajwal",
+    meSpeaking = true,
+    outputs = listOf(AudioOutput(1, OutputKind.BLUETOOTH, "Helmet BT"), AudioOutput(2, OutputKind.EARPIECE, "Phone")),
+    output = AudioOutput(1, OutputKind.BLUETOOTH, "Helmet BT"),
+    volume = 1.4f,
     pingMs = 6,
-    bufferedMs = 60,
-    hearingPeer = true,
 )
 
-@Preview(name = "Rider waiting", showBackground = true, backgroundColor = 0xFF0E1318, heightDp = 900)
+@Preview(name = "Talking · dark", showBackground = true, heightDp = 780)
 @Composable
-private fun RiderWaitingPreview() {
-    PillionTalkTheme {
-        RideScreen(
-            RideState.Connected(previewLink, emptyList()),
-            voice = previewVoice.copy(hearingPeer = false, pingMs = null),
-            onToggleMute = {}, onSelectOutput = {}, onVolumeChange = {}, onBoostChange = {}, onEnd = {}, onRetry = {},
-        )
+private fun TalkingDarkPreview() {
+    PillionTalkTheme(dark = true) {
+        Surface(color = MaterialTheme.colorScheme.background) {
+            RideScreen(RideState.Connected(previewLink, listOf("Redmi"), SystemClock.elapsedRealtime() - 60_000), previewVoice, "Harish", RideActions())
+        }
     }
 }
 
-@Preview(name = "Pillion talking", showBackground = true, backgroundColor = 0xFF0E1318, heightDp = 900)
+@Preview(name = "Muted · light", showBackground = true, heightDp = 780)
 @Composable
-private fun PillionTalkingPreview() {
-    PillionTalkTheme {
-        RideScreen(
-            RideState.Connected(previewLink.copy(role = Role.PILLION, myIp = "192.168.49.23"), listOf("Nothing Phone (4a) Pro")),
-            voice = previewVoice,
-            onToggleMute = {}, onSelectOutput = {}, onVolumeChange = {}, onBoostChange = {}, onEnd = {}, onRetry = {},
-        )
+private fun MutedLightPreview() {
+    PillionTalkTheme(dark = false) {
+        Surface(color = MaterialTheme.colorScheme.background) {
+            RideScreen(RideState.Connected(previewLink, listOf("Redmi"), SystemClock.elapsedRealtime() - 60_000), previewVoice.copy(muted = true, meSpeaking = false), "Harish", RideActions())
+        }
     }
 }
 
-@Preview(name = "Muted", showBackground = true, backgroundColor = 0xFF0E1318, heightDp = 900)
+@Preview(name = "Waiting · dark", showBackground = true, heightDp = 780)
 @Composable
-private fun MutedPreview() {
-    PillionTalkTheme {
-        RideScreen(
-            RideState.Connected(previewLink, listOf("Redmi Note 11 Pro+")),
-            voice = previewVoice.copy(muted = true),
-            onToggleMute = {}, onSelectOutput = {}, onVolumeChange = {}, onBoostChange = {}, onEnd = {}, onRetry = {},
-        )
-    }
-}
-
-@Preview(name = "Failed", showBackground = true, backgroundColor = 0xFF0E1318, heightDp = 800)
-@Composable
-private fun FailedPreview() {
-    PillionTalkTheme {
-        RideScreen(
-            RideState.Failed(Role.PILLION, "Couldn't find your rider's phone. Is it hosting a ride nearby?"),
-            voice = VoiceStats(),
-            onToggleMute = {}, onSelectOutput = {}, onVolumeChange = {}, onBoostChange = {}, onEnd = {}, onRetry = {},
-        )
+private fun WaitingPreview() {
+    PillionTalkTheme(dark = true) {
+        Surface(color = MaterialTheme.colorScheme.background) {
+            RideScreen(RideState.Connected(previewLink, emptyList(), SystemClock.elapsedRealtime()), VoiceStats(running = true), "Harish", RideActions())
+        }
     }
 }

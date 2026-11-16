@@ -8,14 +8,23 @@ import android.app.Service
 import android.content.Context
 import android.content.Intent
 import android.content.pm.ServiceInfo
+import android.graphics.Bitmap
+import android.graphics.Canvas
+import android.graphics.Paint
+import android.graphics.Typeface
 import android.os.IBinder
 import android.os.PowerManager
+import android.os.SystemClock
 import androidx.core.app.NotificationCompat
+import androidx.core.app.Person
 import androidx.core.app.ServiceCompat
 import androidx.core.content.ContextCompat
+import androidx.core.graphics.drawable.IconCompat
+import com.prajwal.pilliontalk.profile.initialsOf
 import com.prajwal.pilliontalk.MainActivity
 import com.prajwal.pilliontalk.PillionTalkApplication
 import com.prajwal.pilliontalk.R
+import com.prajwal.pilliontalk.voice.OutputKind
 import com.prajwal.pilliontalk.voice.VoiceStats
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
@@ -60,6 +69,7 @@ class RideService : Service() {
         when (intent?.action) {
             ACTION_END -> controller.end()
             ACTION_MUTE -> controller.toggleMute()
+            ACTION_SPEAKER -> controller.toggleSpeaker()
             else -> goForeground()
         }
         return START_NOT_STICKY // if Android kills us anyway, don't restart a half-dead ride
@@ -77,15 +87,17 @@ class RideService : Service() {
         wakeLock.acquire(12 * 60 * 60 * 1000L) // a safety cap: 12 hours
 
         // Keep the notification up to date, and stop when the ride is over.
+        // Only re-post when something you'd see actually changes (the voice stats tick twice a
+        // second; re-posting that often would be wasteful and can make the shade flicker).
         scope.launch {
-            combine(controller.state, controller.voice) { state, voice -> state to voice }
-                .distinctUntilChanged { a, b -> a.first == b.first && a.second.muted == b.second.muted && a.second.hearingPeer == b.second.hearingPeer }
-                .collect { (state, voice) ->
-                    if (state == RideState.Idle) {
+            combine(controller.state, controller.voice) { state, voice -> NotificationContent.of(state, voice) }
+                .distinctUntilChanged()
+                .collect { content ->
+                    if (content.ended) {
                         stopSelf()
                     } else {
                         getSystemService(NotificationManager::class.java)
-                            .notify(NOTIFICATION_ID, buildNotification(state, voice))
+                            .notify(NOTIFICATION_ID, buildNotification(controller.state.value, controller.voice.value))
                     }
                 }
         }
@@ -103,17 +115,14 @@ class RideService : Service() {
         super.onTaskRemoved(rootIntent)
     }
 
+    /**
+     * A "call style" notification: the same kind Android uses for phone and WhatsApp calls.
+     * It gets a ride timer chip in the status bar, sits at the top of the shade, and shows its
+     * buttons on the lock screen. The big title is the "person" of the call, so we put the fun
+     * status line there; the facts go underneath.
+     */
     private fun buildNotification(state: RideState, voice: VoiceStats): Notification {
-        val title = when (state) {
-            RideState.Idle -> "Ride ended"
-            is RideState.Connecting -> "Connecting…"
-            is RideState.Connected -> when {
-                voice.hearingPeer -> if (voice.muted) "On a ride · muted" else "On a ride · talking"
-                state.paired -> "Connected"
-                else -> "Waiting for your pillion"
-            }
-            is RideState.Failed -> "Connection lost"
-        }
+        val content = NotificationContent.of(state, voice)
 
         // Tapping the notification opens the app.
         val openApp = PendingIntent.getActivity(
@@ -121,18 +130,63 @@ class RideService : Service() {
             PendingIntent.FLAG_IMMUTABLE,
         )
 
-        return NotificationCompat.Builder(this, CHANNEL_ID)
+        val person = Person.Builder()
+            .setName(content.title)
+            .setIcon(IconCompat.createWithBitmap(avatarBitmap(content.initials)))
+            .setImportant(true)
+            .build()
+        val style = NotificationCompat.CallStyle.forOngoingCall(person, actionIntent(ACTION_END, 2))
+
+        val builder = NotificationCompat.Builder(this, CHANNEL_ID)
             .setSmallIcon(R.drawable.ic_notification)
-            .setContentTitle(title)
-            .setContentText("Pillion Talk keeps voice running while you ride.")
+            .setStyle(style)
+            .setContentText(content.subtitle)
             .setContentIntent(openApp)
             .setOngoing(true)
             .setSilent(true)
             .setCategory(NotificationCompat.CATEGORY_CALL)
+            .setVisibility(NotificationCompat.VISIBILITY_PUBLIC) // show the controls on the lock screen
             .setForegroundServiceBehavior(NotificationCompat.FOREGROUND_SERVICE_IMMEDIATE)
-            .addAction(0, if (voice.muted) "Unmute" else "Mute", actionIntent(ACTION_MUTE, 1))
-            .addAction(0, "End ride", actionIntent(ACTION_END, 2))
-            .build()
+            .addAction(
+                if (voice.muted) R.drawable.ic_mic_off else R.drawable.ic_mic,
+                if (voice.muted) "Unmute" else "Mute",
+                actionIntent(ACTION_MUTE, 1),
+            )
+
+        if (state is RideState.Connected) {
+            // The ride timer: "when" is the moment the ride started, and the chronometer counts up.
+            builder.setUsesChronometer(true)
+                .setWhen(System.currentTimeMillis() - (SystemClock.elapsedRealtime() - state.since))
+                .addAction(
+                    R.drawable.ic_speaker,
+                    if (content.onSpeaker) "Headset" else "Speaker",
+                    actionIntent(ACTION_SPEAKER, 3),
+                )
+        }
+        return builder.build()
+    }
+
+    /**
+     * Draws the same kind of avatar the app uses (initials on a neutral circle) into a bitmap,
+     * because notifications can't show Compose UI. Canvas here is Android's classic 2D drawing
+     * API: the same idea as Compose's Canvas or Flutter's CustomPainter.
+     */
+    private fun avatarBitmap(initials: String): Bitmap {
+        val size = 192
+        val bitmap = Bitmap.createBitmap(size, size, Bitmap.Config.ARGB_8888)
+        val canvas = Canvas(bitmap)
+        val circle = Paint(Paint.ANTI_ALIAS_FLAG).apply { color = 0xFF2B2B2B.toInt() }
+        canvas.drawCircle(size / 2f, size / 2f, size / 2f, circle)
+        val text = Paint(Paint.ANTI_ALIAS_FLAG).apply {
+            color = 0xFFF2F2F2.toInt()
+            textSize = size * 0.36f
+            textAlign = Paint.Align.CENTER
+            typeface = Typeface.create(Typeface.DEFAULT, Typeface.BOLD)
+        }
+        // Centre the text vertically: the baseline sits below the middle by half the text height.
+        val y = size / 2f - (text.descent() + text.ascent()) / 2
+        canvas.drawText(initials, size / 2f, y, text)
+        return bitmap
     }
 
     private fun actionIntent(action: String, requestCode: Int) = PendingIntent.getService(
@@ -151,9 +205,31 @@ class RideService : Service() {
         private const val NOTIFICATION_ID = 1
         private const val ACTION_END = "com.prajwal.pilliontalk.END"
         private const val ACTION_MUTE = "com.prajwal.pilliontalk.MUTE"
+        private const val ACTION_SPEAKER = "com.prajwal.pilliontalk.SPEAKER"
 
         fun start(context: Context) {
             ContextCompat.startForegroundService(context, Intent(context, RideService::class.java))
         }
+    }
+}
+
+/** Just the parts of the ride the notification shows, so we can tell when it needs re-posting. */
+private data class NotificationContent(
+    val title: String,
+    val subtitle: String,
+    val initials: String,
+    val muted: Boolean,
+    val onSpeaker: Boolean,
+    val ended: Boolean,
+) {
+    companion object {
+        fun of(state: RideState, voice: VoiceStats) = NotificationContent(
+            title = RideCopy.title(state, voice),
+            subtitle = RideCopy.subtitle(state, voice),
+            initials = voice.peerName?.let(::initialsOf) ?: "?",
+            muted = voice.muted,
+            onSpeaker = voice.output?.kind == OutputKind.SPEAKER,
+            ended = state == RideState.Idle,
+        )
     }
 }

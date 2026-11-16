@@ -1,4 +1,4 @@
 <resources>
-    <!-- Same as PillionColors.Background in Theme.kt. -->
-    <color name="background">#FF0E1318</color>
+    <!-- Window background before Compose draws (light mode). Same as the light theme's background. -->
+    <color name="background">#FFFFFFFF</color>
 </resources>

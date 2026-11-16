@@ -27,15 +27,32 @@ import java.util.concurrent.ArrayBlockingQueue
 import java.util.concurrent.atomic.AtomicInteger
 import java.util.concurrent.atomic.AtomicLong
 import kotlin.math.roundToInt
+import kotlin.math.sqrt
 
-/** What the voice link is doing, for the UI. Updated twice a second, and when the output changes. */
+/** What the voice link is doing, for the UI and the notification. Updated twice a second, and on changes. */
 data class VoiceStats(
     val running: Boolean = false,
+    /** Your mic is off. */
     val muted: Boolean = false,
-    /** Where voice can go, for the output picker. */
+    /** You've silenced the other person (their audio isn't played). */
+    val peerSilenced: Boolean = false,
+    /** The other person's name, once their HELLO arrives. */
+    val peerName: String? = null,
+    /** Someone is speaking right now: drives the rings around the avatars. */
+    val meSpeaking: Boolean = false,
+    val peerSpeaking: Boolean = false,
+    /** How long nobody has said anything, in milliseconds. */
+    val quietForMs: Long = 0,
+    /** Where voice can go, and where it's going now. */
     val outputs: List<AudioOutput> = emptyList(),
-    /** Where voice is going right now. */
     val output: AudioOutput? = null,
+    /**
+     * Volume from 0.0 to 2.0. Up to 1.0 is the phone's call volume; above 1.0 the phone is at
+     * maximum and the extra is digital boost (e.g. 1.4 = phone at max, samples × 1.4).
+     */
+    val volume: Float = 1f,
+    /** True when the link is struggling: rising loss, slow pings, or packets stopped arriving. */
+    val weakSignal: Boolean = false,
     val sent: Int = 0,
     val received: Int = 0,
     val lost: Int = 0,
@@ -47,13 +64,10 @@ data class VoiceStats(
     val underruns: Int = 0,
     /** True if we've heard from the other phone in the last 2 seconds. */
     val hearingPeer: Boolean = false,
-    /** Call volume, 0.0 to 1.0. The phone's volume buttons change it too. */
-    val volume: Float = 0f,
-    /** Extra digital gain on top of the maximum volume, for loud roads. */
-    val boost: Boolean = false,
     val error: String? = null,
 ) {
     val lossPercent: Double get() = if (received + lost == 0) 0.0 else lost * 100.0 / (received + lost)
+    val boosted: Boolean get() = volume > 1f
 }
 
 /**
@@ -68,7 +82,7 @@ data class VoiceStats(
  *   1. capture:  read 20 ms from the mic → send it
  *   2. receive:  wait for packets → voice goes into the jitter buffer, pings get answered
  *   3. playback: take 20 ms from the jitter buffer → play it (covering any gaps)
- *   4. control:  send a ping every second, publish stats twice a second
+ *   4. control:  ping and say hello every second, check link health, publish stats
  */
 @SuppressLint("MissingPermission") // The UI asks for RECORD_AUDIO before a ride starts.
 class VoiceEngine(context: Context) {
@@ -79,8 +93,7 @@ class VoiceEngine(context: Context) {
     /**
      * Wi-Fi saves power by napping between packets and delivering them in bursts. Great for web
      * pages, terrible for voice: you hear it as stutter. A low-latency lock asks the phone not to
-     * nap while we hold it. Android honours it while the app is on screen (which it is: the ride
-     * screen keeps the display on).
+     * nap while we hold it.
      */
     private val wifiLock = context.applicationContext.getSystemService(WifiManager::class.java)
         .createWifiLock(WifiManager.WIFI_MODE_FULL_LOW_LATENCY, "PillionTalk:voice")
@@ -92,9 +105,16 @@ class VoiceEngine(context: Context) {
     // @Volatile: written by one thread, read by others. Guarantees they all see the latest value.
     @Volatile private var running = false
     @Volatile private var muted = false
+    @Volatile private var peerSilenced = false
     @Volatile private var boostGain = 1f
     @Volatile private var peer: SocketAddress? = null
+    @Volatile private var peerName: String? = null
+    @Volatile private var myName = ""
     @Volatile private var lastHeardAt = 0L
+    @Volatile private var meSpokeAt = 0L
+    @Volatile private var peerSpokeAt = 0L
+    @Volatile private var startedAt = 0L
+    @Volatile private var weakSignal = false
     @Volatile private var error: String? = null
 
     private var socket: DatagramSocket? = null
@@ -119,12 +139,13 @@ class VoiceEngine(context: Context) {
     /**
      * Start talking. [peerIp] is the other phone's address if we know it (the pillion knows
      * the rider is at 192.168.49.1). The rider passes null and learns the pillion's address
-     * from the first packet that arrives.
+     * from the first packet that arrives. [name] is sent to the other phone.
      */
     @Synchronized // start and stop can be called from different threads; never let them overlap
-    fun start(peerIp: String?) {
+    fun start(peerIp: String?, name: String) {
         if (running) return
         resetCounters()
+        myName = name
         peer = peerIp?.let { InetSocketAddress(InetAddress.getByName(it), PORT) }
 
         try {
@@ -139,6 +160,7 @@ class VoiceEngine(context: Context) {
         }
 
         running = true
+        startedAt = SystemClock.elapsedRealtime()
         threads += audioThread("capture", ::captureLoop)
         threads += audioThread("receive", ::receiveLoop)
         threads += audioThread("playback", ::playbackLoop)
@@ -164,30 +186,30 @@ class VoiceEngine(context: Context) {
         publishStats()
     }
 
+    /** Stop playing the other person's audio (they keep hearing you). */
+    fun setPeerSilenced(value: Boolean) {
+        peerSilenced = value
+        publishStats()
+    }
+
     /** Send voice to a different output (earpiece, speaker, headset…). */
     fun selectOutput(id: Int) = router.select(id)
 
     /**
-     * Sets the phone's call volume (the same one the volume buttons change during a call),
-     * as a fraction of its maximum. Android's call volume has a minimum above zero, so it
-     * never goes fully silent; use mute on the other phone for that.
+     * One volume control from 0.0 to 2.0:
+     * - 0.0–1.0 sets the phone's call volume (the same one the volume buttons change).
+     * - 1.0–2.0 keeps the phone at maximum and multiplies every sample by the extra
+     *   ("boost"), for wind and engine noise. Loud peaks get clamped, which can sound harsh.
+     * Android's call volume has a minimum above zero, so 0 is quiet but not silent.
      */
-    fun setVolume(fraction: Float) {
+    fun setVolume(level: Float) {
+        val clamped = level.coerceIn(0f, MAX_VOLUME)
         val stream = AudioManager.STREAM_VOICE_CALL
         val min = audioManager.getStreamMinVolume(stream)
         val max = audioManager.getStreamMaxVolume(stream)
-        val index = (min + fraction.coerceIn(0f, 1f) * (max - min)).roundToInt()
-        audioManager.setStreamVolume(stream, index, 0)
-        publishStats()
-    }
-
-    /**
-     * Boost multiplies every sample by 2 (+6 dB) before playing it: louder than the phone's
-     * maximum, for wind and engine noise. Loud peaks get clipped (flattened), which can sound
-     * harsh, so it's opt-in.
-     */
-    fun setBoost(on: Boolean) {
-        boostGain = if (on) BOOST_GAIN else 1f
+        val phonePart = clamped.coerceAtMost(1f)
+        audioManager.setStreamVolume(stream, (min + phonePart * (max - min)).roundToInt(), 0)
+        boostGain = if (clamped > 1f) clamped else 1f
         publishStats()
     }
 
@@ -212,9 +234,9 @@ class VoiceEngine(context: Context) {
             while (running) {
                 // Blocks until 20 ms of audio is ready, so this loop runs exactly 50 times a second.
                 val read = recorder.read(frame, 0, FRAME_BYTES)
-                if (read <= 0) continue
+                if (read <= 0 || muted) continue
+                if (isSpeech(frame, read)) meSpokeAt = SystemClock.elapsedRealtime()
                 val target = peer ?: continue // rider: nobody to send to until the pillion says hello
-                if (muted) continue
                 send(Packets.voice(sequence, frame, read), target)
                 sequence = (sequence + 1) and 0xFFFF
                 sent.incrementAndGet()
@@ -254,6 +276,10 @@ class VoiceEngine(context: Context) {
                     expectedSequence = (sequence + 1) and 0xFFFF
                     received.incrementAndGet()
 
+                    val audioLength = packet.length - Packets.VOICE_HEADER_BYTES
+                    if (isSpeech(buffer, audioLength, offset = Packets.VOICE_HEADER_BYTES)) {
+                        peerSpokeAt = SystemClock.elapsedRealtime()
+                    }
                     val audio = buffer.copyOfRange(Packets.VOICE_HEADER_BYTES, packet.length)
                     if (!jitterBuffer.offer(audio)) { // full: drop the oldest to keep delay low
                         jitterBuffer.poll()
@@ -262,6 +288,7 @@ class VoiceEngine(context: Context) {
                 }
                 Packets.PING -> send(Packets.pong(Packets.timestampOf(buffer)), packet.socketAddress)
                 Packets.PONG -> lastPingMs.set(SystemClock.elapsedRealtime() - Packets.timestampOf(buffer))
+                Packets.HELLO -> peerName = Packets.nameOf(buffer, packet.length).ifBlank { null }
             }
         }
     }
@@ -298,7 +325,11 @@ class VoiceEngine(context: Context) {
                 val frame = jitterBuffer.poll()
                 when {
                     frame != null -> {
-                        val out = if (boostGain != 1f) scale(frame, boostGain) else frame
+                        val out = when {
+                            peerSilenced -> silence // keep draining the buffer, just don't play it
+                            boostGain != 1f -> scale(frame, boostGain)
+                            else -> frame
+                        }
                         track.write(out, 0, out.size)
                         lastFrame = frame
                         concealed = 0
@@ -308,7 +339,7 @@ class VoiceEngine(context: Context) {
                     lastFrame != null && concealed < MAX_CONCEALED_FRAMES -> {
                         concealed++
                         lastFrame = scale(lastFrame, 0.5f)
-                        track.write(lastFrame, 0, lastFrame.size)
+                        track.write(if (peerSilenced) silence else lastFrame, 0, lastFrame.size)
                         if (isTalking()) underruns.incrementAndGet()
                     }
                     // Still nothing: the other side went quiet (muted) or the link hiccuped.
@@ -329,8 +360,23 @@ class VoiceEngine(context: Context) {
 
     private fun controlLoop() {
         var tick = 0
+        var lastReceived = 0
+        var lastLost = 0
         while (running) {
-            if (tick % 2 == 0) peer?.let { send(Packets.ping(SystemClock.elapsedRealtime()), it) }
+            // Every second: say hello and ping. Every 2 seconds: judge how healthy the link is.
+            if (tick % 2 == 0) {
+                peer?.let {
+                    send(Packets.hello(myName), it)
+                    send(Packets.ping(SystemClock.elapsedRealtime()), it)
+                }
+            }
+            if (tick % 4 == 0) {
+                val newReceived = received.get() - lastReceived
+                val newLost = lost.get() - lastLost
+                lastReceived = received.get()
+                lastLost = lost.get()
+                weakSignal = isWeak(newReceived, newLost)
+            }
             publishStats()
             tick++
             try {
@@ -341,7 +387,36 @@ class VoiceEngine(context: Context) {
         }
     }
 
+    /**
+     * The link is struggling if, over the last 2 seconds, more than 8% of voice packets went
+     * missing, the round trip is slower than 250 ms, or nothing at all has arrived for 2.5 s
+     * (hellos and pings keep coming even when the other person is muted, so silence here means
+     * trouble, not quiet).
+     */
+    private fun isWeak(newReceived: Int, newLost: Int): Boolean {
+        if (peer == null || lastHeardAt == 0L) return false
+        val recentLoss = if (newReceived + newLost == 0) 0f else newLost.toFloat() / (newReceived + newLost)
+        val ping = lastPingMs.get()
+        val silentFor = SystemClock.elapsedRealtime() - lastHeardAt
+        return recentLoss > 0.08f || ping > 250 || silentFor > 2_500
+    }
+
     // --- Helpers ---------------------------------------------------------------------------------
+
+    /**
+     * Is someone talking in this frame? Measures loudness as RMS (root mean square): square every
+     * sample, average, square root. Silence after noise suppression sits far below the threshold.
+     */
+    private fun isSpeech(bytes: ByteArray, length: Int, offset: Int = 0): Boolean {
+        val samples = ByteBuffer.wrap(bytes, offset, length).order(ByteOrder.LITTLE_ENDIAN).asShortBuffer()
+        if (samples.remaining() == 0) return false
+        var sum = 0.0
+        while (samples.hasRemaining()) {
+            val s = samples.get().toDouble()
+            sum += s * s
+        }
+        return sqrt(sum / (length / 2)) > SPEECH_RMS
+    }
 
     /** Voice packets arrived in the last 200 ms, so a missing frame is a real gap, not a pause. */
     private fun isTalking() = SystemClock.elapsedRealtime() - lastHeardAt < 200
@@ -360,7 +435,9 @@ class VoiceEngine(context: Context) {
         return out
     }
 
+    /** The current volume on the 0–2 scale, re-read every time so the volume buttons show up too. */
     private fun currentVolume(): Float {
+        if (boostGain > 1f) return boostGain
         val stream = AudioManager.STREAM_VOICE_CALL
         val min = audioManager.getStreamMinVolume(stream)
         val max = audioManager.getStreamMaxVolume(stream)
@@ -371,25 +448,32 @@ class VoiceEngine(context: Context) {
         try {
             socket?.send(DatagramPacket(bytes, bytes.size, to))
         } catch (e: Exception) {
-            // A dropped packet is fine for live audio; the watcher in RideViewModel notices real disconnects.
+            // A dropped packet is fine for live audio; the link watcher notices real disconnects.
         }
     }
 
     private fun publishStats() {
+        val now = SystemClock.elapsedRealtime()
+        val lastSpeech = maxOf(meSpokeAt, peerSpokeAt, startedAt)
         _stats.value = VoiceStats(
             running = running,
             muted = muted,
+            peerSilenced = peerSilenced,
+            peerName = peerName,
+            meSpeaking = running && !muted && now - meSpokeAt < SPEAKING_HANGOVER_MS,
+            peerSpeaking = running && now - peerSpokeAt < SPEAKING_HANGOVER_MS,
+            quietForMs = if (running) now - lastSpeech else 0,
             outputs = router.outputs,
             output = router.current,
+            volume = currentVolume(),
+            weakSignal = running && weakSignal,
             sent = sent.get(),
             received = received.get(),
             lost = lost.get(),
             pingMs = lastPingMs.get().takeIf { it >= 0 },
             bufferedMs = jitterBuffer.size * FRAME_MS,
             underruns = underruns.get(),
-            hearingPeer = running && SystemClock.elapsedRealtime() - lastHeardAt < 2_000,
-            volume = currentVolume(), // re-read every time, so the volume buttons show up too
-            boost = boostGain != 1f,
+            hearingPeer = running && now - lastHeardAt < 2_000,
             error = error,
         )
     }
@@ -398,6 +482,11 @@ class VoiceEngine(context: Context) {
         listOf(sent, received, lost, underruns).forEach { it.set(0) }
         lastPingMs.set(-1)
         lastHeardAt = 0
+        meSpokeAt = 0
+        peerSpokeAt = 0
+        peerName = null
+        peerSilenced = false
+        weakSignal = false
         error = null
         jitterBuffer.clear()
     }
@@ -422,7 +511,9 @@ class VoiceEngine(context: Context) {
         const val TARGET_FRAMES = 3       // start playing once 60 ms is queued
         const val MAX_BUFFERED_FRAMES = 8 // never more than 160 ms waiting to be played
         const val MAX_CONCEALED_FRAMES = 2
-        const val BOOST_GAIN = 2f // +6 dB
+        const val MAX_VOLUME = 2f         // 200%: phone at max, plus ×2 boost (+6 dB)
+        private const val SPEECH_RMS = 700.0           // loudness that counts as talking (out of 32,768)
+        private const val SPEAKING_HANGOVER_MS = 350L  // keep the ring lit briefly between words
         private const val ENCODING = AudioFormat.ENCODING_PCM_16BIT
     }
 }

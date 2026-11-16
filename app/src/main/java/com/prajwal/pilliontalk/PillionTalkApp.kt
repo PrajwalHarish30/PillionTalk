@@ -29,6 +29,8 @@ import androidx.core.content.ContextCompat
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import androidx.lifecycle.viewmodel.compose.viewModel
 import com.prajwal.pilliontalk.home.HomeScreen
+import com.prajwal.pilliontalk.home.NameDialog
+import com.prajwal.pilliontalk.ride.RideActions
 import com.prajwal.pilliontalk.ride.RideScreen
 import com.prajwal.pilliontalk.ride.RideState
 import com.prajwal.pilliontalk.ride.RideViewModel
@@ -56,12 +58,14 @@ fun PillionTalkApp(viewModel: RideViewModel = viewModel()) {
     // Like StreamBuilder / ValueListenableBuilder: recomposes whenever the state changes.
     val state by viewModel.state.collectAsStateWithLifecycle()
     val voice by viewModel.voice.collectAsStateWithLifecycle()
+    val myName by viewModel.myName.collectAsStateWithLifecycle()
     val context = LocalContext.current
     val snackbar = remember { SnackbarHostState() }
     val scope = rememberCoroutineScope()
 
-    // Remember which seat was tapped while the permission dialog is open.
+    // Remember which seat was tapped while a dialog is open.
     var pendingRole by rememberSaveable { mutableStateOf<Role?>(null) }
+    var showNameDialog by rememberSaveable { mutableStateOf(false) }
 
     // Shows Android's permission dialog and calls us back with the answer.
     val permissionLauncher = rememberLauncherForActivityResult(
@@ -78,7 +82,7 @@ fun PillionTalkApp(viewModel: RideViewModel = viewModel()) {
         }
     }
 
-    fun pickRole(role: Role) {
+    fun startWithPermissions(role: Role) {
         val granted = ridePermissions.all {
             ContextCompat.checkSelfPermission(context, it) == PackageManager.PERMISSION_GRANTED
         }
@@ -94,6 +98,31 @@ fun PillionTalkApp(viewModel: RideViewModel = viewModel()) {
             }
             permissionLauncher.launch(ask)
         }
+    }
+
+    fun pickRole(role: Role) {
+        // First ride: ask for a name before anything else.
+        if (myName.isBlank()) {
+            pendingRole = role
+            showNameDialog = true
+        } else {
+            startWithPermissions(role)
+        }
+    }
+
+    if (showNameDialog) {
+        NameDialog(
+            current = myName,
+            onSave = { name ->
+                viewModel.setMyName(name)
+                showNameDialog = false
+                pendingRole?.let { startWithPermissions(it) }
+            },
+            onDismiss = {
+                showNameDialog = false
+                pendingRole = null
+            },
+        )
     }
 
     val onRide = state != RideState.Idle
@@ -116,16 +145,24 @@ fun PillionTalkApp(viewModel: RideViewModel = viewModel()) {
                 RideScreen(
                     state = state,
                     voice = voice,
-                    onToggleMute = viewModel::toggleMute,
-                    onSelectOutput = viewModel::selectOutput,
-                    onVolumeChange = viewModel::setVolume,
-                    onBoostChange = viewModel::setBoost,
-                    onEnd = viewModel::end,
-                    onRetry = viewModel::retry,
+                    myName = myName,
+                    actions = RideActions(
+                        onToggleMute = viewModel::toggleMute,
+                        onTogglePeerSilenced = viewModel::togglePeerSilenced,
+                        onSelectOutput = viewModel::selectOutput,
+                        onVolumeChange = viewModel::setVolume,
+                        onEnd = viewModel::end,
+                        onRetry = viewModel::retry,
+                    ),
                     modifier = Modifier.padding(innerPadding),
                 )
             } else {
-                HomeScreen(onPickRole = ::pickRole, modifier = Modifier.padding(innerPadding))
+                HomeScreen(
+                    myName = myName,
+                    onEditName = { showNameDialog = true },
+                    onPickRole = ::pickRole,
+                    modifier = Modifier.padding(innerPadding),
+                )
             }
         }
     }

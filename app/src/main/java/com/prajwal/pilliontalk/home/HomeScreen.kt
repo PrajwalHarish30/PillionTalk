@@ -1,6 +1,7 @@
 package com.prajwal.pilliontalk.home
 
-import androidx.compose.foundation.BorderStroke
+import androidx.compose.foundation.background
+import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
@@ -9,62 +10,90 @@ import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
-import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.foundation.text.KeyboardActions
+import androidx.compose.foundation.text.KeyboardOptions
+import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.automirrored.rounded.KeyboardArrowRight
+import androidx.compose.material.icons.rounded.Headphones
+import androidx.compose.material.icons.rounded.TwoWheeler
+import androidx.compose.material3.AlertDialog
+import androidx.compose.material3.Icon
 import androidx.compose.material3.MaterialTheme
+import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
+import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.saveable.rememberSaveable
+import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
-import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.draw.clip
+import androidx.compose.ui.graphics.vector.ImageVector
+import androidx.compose.ui.text.input.ImeAction
+import androidx.compose.ui.text.input.KeyboardCapitalization
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.tooling.preview.Preview
 import androidx.compose.ui.unit.dp
-import androidx.compose.ui.unit.sp
+import com.prajwal.pilliontalk.profile.ProfileStore
+import com.prajwal.pilliontalk.profile.initialsOf
+import com.prajwal.pilliontalk.ui.components.Avatar
+import com.prajwal.pilliontalk.ui.components.SectionLabel
 import com.prajwal.pilliontalk.ui.theme.PillionTalkTheme
 import com.prajwal.pilliontalk.wifidirect.Role
 
-/** First screen: pick your seat. */
+/** First screen: your name, and start or join a ride. */
 @Composable
-fun HomeScreen(onPickRole: (Role) -> Unit, modifier: Modifier = Modifier) {
+fun HomeScreen(
+    myName: String,
+    onEditName: () -> Unit,
+    onPickRole: (Role) -> Unit,
+    modifier: Modifier = Modifier,
+) {
     Column(
-        modifier = modifier.fillMaxSize().padding(horizontal = 20.dp, vertical = 24.dp),
-        verticalArrangement = Arrangement.spacedBy(16.dp),
+        modifier = modifier.fillMaxSize().padding(horizontal = 20.dp, vertical = 16.dp),
+        verticalArrangement = Arrangement.spacedBy(12.dp),
     ) {
-        Spacer(Modifier.weight(1f)) // pushes everything below it towards the bottom (thumb reach)
+        Row(verticalAlignment = Alignment.CenterVertically) {
+            Text("Pillion Talk", style = MaterialTheme.typography.titleLarge, modifier = Modifier.weight(1f))
+            // Your avatar: tap to change your name.
+            // clip before clickable, so the press ripple is round like the avatar, not a square.
+            Box(Modifier.clip(CircleShape).clickable(onClick = onEditName)) {
+                Avatar(initials = initialsOf(myName.ifBlank { "?" }), size = 36.dp)
+            }
+        }
 
-        Text("Pillion Talk", style = MaterialTheme.typography.displaySmall)
         Text(
-            "Talk on the ride. No signal, no data, no calls.",
+            if (myName.isBlank()) "Hi there. Start a ride, or join one." else "Hi $myName. Start a ride, or join one.",
             style = MaterialTheme.typography.bodyLarge,
             color = MaterialTheme.colorScheme.onSurfaceVariant,
         )
 
         Spacer(Modifier.height(8.dp))
+        SectionLabel("Start or join")
 
-        RoleCard(
-            emoji = "🏍️",
-            title = "I'm riding",
-            subtitle = "Start the ride. Your pillion joins your phone.",
-            highlighted = true,
+        RoleRow(
+            icon = Icons.Rounded.TwoWheeler,
+            title = "Start a ride",
+            subtitle = "You're riding. Your pillion joins you.",
             onClick = { onPickRole(Role.RIDER) },
         )
-        RoleCard(
-            emoji = "🎧",
-            title = "I'm the pillion",
-            subtitle = "Join your rider's phone.",
-            highlighted = false,
+        RoleRow(
+            icon = Icons.Rounded.Headphones,
+            title = "Join a ride",
+            subtitle = "You're the pillion.",
             onClick = { onPickRole(Role.PILLION) },
         )
 
         Spacer(Modifier.weight(1f))
-
         Text(
-            "Both phones need Pillion Talk with Wi-Fi switched on. Mobile data isn't needed.",
+            "Works offline · no SIM or data needed",
             style = MaterialTheme.typography.bodySmall,
             color = MaterialTheme.colorScheme.onSurfaceVariant,
             textAlign = TextAlign.Center,
@@ -73,48 +102,76 @@ fun HomeScreen(onPickRole: (Role) -> Unit, modifier: Modifier = Modifier) {
     }
 }
 
-/**
- * A big, glove-friendly button for each seat. Surface(onClick = …) gives us the ripple
- * and accessibility semantics of a button, with our own layout inside.
- */
+/** One big tappable row (Surface(onClick) gives the ripple and button semantics). */
 @Composable
-private fun RoleCard(
-    emoji: String,
-    title: String,
-    subtitle: String,
-    highlighted: Boolean,
-    onClick: () -> Unit,
-) {
-    val container = if (highlighted) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.surfaceVariant
-    val content = if (highlighted) MaterialTheme.colorScheme.onPrimary else MaterialTheme.colorScheme.onSurface
-
+private fun RoleRow(icon: ImageVector, title: String, subtitle: String, onClick: () -> Unit) {
     Surface(
         onClick = onClick,
-        shape = RoundedCornerShape(24.dp),
-        color = container,
-        contentColor = content,
-        border = if (highlighted) null else BorderStroke(1.dp, MaterialTheme.colorScheme.outline),
-        modifier = Modifier.fillMaxWidth().heightIn(min = 112.dp),
+        shape = RoundedCornerShape(16.dp),
+        color = MaterialTheme.colorScheme.surface,
+        modifier = Modifier.fillMaxWidth(),
     ) {
         Row(
-            modifier = Modifier.padding(20.dp),
+            Modifier.padding(16.dp),
             verticalAlignment = Alignment.CenterVertically,
-            horizontalArrangement = Arrangement.spacedBy(16.dp),
+            horizontalArrangement = Arrangement.spacedBy(14.dp),
         ) {
-            // A soft circle behind the emoji.
-            Surface(shape = CircleShape, color = Color.Black.copy(alpha = 0.14f), modifier = Modifier.size(64.dp)) {
-                Box(contentAlignment = Alignment.Center) { Text(emoji, fontSize = 32.sp) }
+            Box(
+                Modifier.size(48.dp).background(MaterialTheme.colorScheme.surfaceVariant, CircleShape),
+                contentAlignment = Alignment.Center,
+            ) {
+                Icon(icon, contentDescription = null, modifier = Modifier.size(24.dp))
             }
-            Column(verticalArrangement = Arrangement.spacedBy(4.dp)) {
-                Text(title, style = MaterialTheme.typography.titleLarge)
-                Text(subtitle, style = MaterialTheme.typography.bodyMedium, color = content.copy(alpha = 0.8f))
+            Column(Modifier.weight(1f)) {
+                Text(title, style = MaterialTheme.typography.titleMedium)
+                Text(subtitle, style = MaterialTheme.typography.bodyMedium, color = MaterialTheme.colorScheme.onSurfaceVariant)
             }
+            Icon(
+                Icons.AutoMirrored.Rounded.KeyboardArrowRight,
+                contentDescription = null,
+                tint = MaterialTheme.colorScheme.onSurfaceVariant,
+            )
         }
     }
 }
 
-@Preview(showBackground = true, backgroundColor = 0xFF0E1318, heightDp = 780)
+/** "What should your pillion call you?" Shown on first use, and when you tap your avatar. */
+@Composable
+fun NameDialog(current: String, onSave: (String) -> Unit, onDismiss: () -> Unit) {
+    var text by rememberSaveable { mutableStateOf(current) }
+    AlertDialog(
+        onDismissRequest = onDismiss,
+        title = { Text("What should they call you?") },
+        text = {
+            Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                Text(
+                    "Your name shows up on the other phone during a ride.",
+                    style = MaterialTheme.typography.bodyMedium,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                )
+                OutlinedTextField(
+                    value = text,
+                    onValueChange = { text = it.take(ProfileStore.MAX_NAME_LENGTH) },
+                    singleLine = true,
+                    placeholder = { Text("Prajwal") },
+                    keyboardOptions = KeyboardOptions(capitalization = KeyboardCapitalization.Words, imeAction = ImeAction.Done),
+                    keyboardActions = KeyboardActions(onDone = { if (text.isNotBlank()) onSave(text) }),
+                )
+            }
+        },
+        confirmButton = {
+            TextButton(onClick = { onSave(text) }, enabled = text.isNotBlank()) { Text("Save") }
+        },
+        dismissButton = { TextButton(onClick = onDismiss) { Text("Cancel") } },
+    )
+}
+
+@Preview(showBackground = true, heightDp = 760)
 @Composable
 private fun HomePreview() {
-    PillionTalkTheme { HomeScreen(onPickRole = {}) }
+    PillionTalkTheme(dark = true) {
+        Surface(color = MaterialTheme.colorScheme.background) {
+            HomeScreen(myName = "Prajwal", onEditName = {}, onPickRole = {})
+        }
+    }
 }

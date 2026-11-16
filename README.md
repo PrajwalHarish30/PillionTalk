@@ -8,14 +8,15 @@ helmet headset ⇄ (Bluetooth) ⇄ phone ⇄ (Wi-Fi Direct, 5 GHz, UDP) ⇄ phon
 
 ## Status
 
-Phase 1 in progress. The app has a home screen where you pick your seat, and a ride screen:
+Phase 1, nearly done. What works today:
 
-- **I'm riding** creates a Wi-Fi Direct group (preferring 5 GHz) and waits for the pillion.
-- **I'm the pillion** finds and joins the rider's group.
-- Both screens show live connection status, the band in use, and connection details.
-- **Voice v1:** once connected, both phones stream raw 16 kHz audio to each other over UDP, routed to a Bluetooth headset if one is connected. There's a mute button and live stats: ping, packet loss, buffer and gaps.
+- **Start a ride / Join a ride:** the rider's phone creates a Wi-Fi Direct group (preferring 5 GHz) and the pillion's phone joins it.
+- **Two-way voice** over UDP, routed to a Bluetooth headset when one is connected. It keeps running in the background through a foreground service.
+- **Names:** each rider sets a name once, and it's shown on the other phone.
+- **Ride screen** (pure mono, light and dark): speaking rings around whoever is talking, an output dropdown with a 0–200% volume (above 100% is boost), tap the other person to change their volume or silence them, and a details sheet with the link stats.
+- **Fun status lines** ("Yapping at full throttle", "Mic's parked"…) shared by the screen and a call-style notification, which has a ride timer and Mute, Speaker and Hang up buttons on the lock screen.
 
-Next: Opus compression, a foreground service so voice keeps going with the screen off, and auto-reconnect.
+Next: Opus compression, auto-reconnect, QR pairing.
 
 ## Stack
 

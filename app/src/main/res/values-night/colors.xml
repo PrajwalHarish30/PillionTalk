@@ -1,0 +1,4 @@
+<resources>
+    <!-- values-night/ is used automatically in dark mode. Same as the dark theme's background. -->
+    <color name="background">#FF111111</color>
+</resources>

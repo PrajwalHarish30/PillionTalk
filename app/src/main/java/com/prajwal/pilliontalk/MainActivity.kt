@@ -19,10 +19,11 @@ class MainActivity : ComponentActivity() {
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
 
-        // Draw behind the status and navigation bars, with light icons (our background is dark).
+        // Draw behind the status and navigation bars. SystemBarStyle.auto picks dark or light
+        // bar icons to match the phone's theme, like the app itself.
         enableEdgeToEdge(
-            statusBarStyle = SystemBarStyle.dark(Color.TRANSPARENT),
-            navigationBarStyle = SystemBarStyle.dark(Color.TRANSPARENT),
+            statusBarStyle = SystemBarStyle.auto(Color.TRANSPARENT, Color.TRANSPARENT),
+            navigationBarStyle = SystemBarStyle.auto(Color.TRANSPARENT, Color.TRANSPARENT),
         )
 
         // The phone's volume buttons should change the call volume (what our voice uses),

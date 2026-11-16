@@ -13,10 +13,14 @@ import kotlinx.coroutines.flow.StateFlow
  */
 class RideViewModel(app: Application) : AndroidViewModel(app) {
 
-    private val controller = (app as PillionTalkApplication).rideController
+    private val pillion = app as PillionTalkApplication
+    private val controller = pillion.rideController
 
     val state: StateFlow<RideState> = controller.state
     val voice: StateFlow<VoiceStats> = controller.voice
+    val myName: StateFlow<String> = pillion.profile.name
+
+    fun setMyName(name: String) = pillion.profile.setName(name)
 
     fun start(role: Role) {
         // Start the foreground service first: it's what lets voice keep going in the background.
@@ -27,7 +31,7 @@ class RideViewModel(app: Application) : AndroidViewModel(app) {
     fun end() = controller.end()
     fun retry() = controller.retry()
     fun toggleMute() = controller.toggleMute()
+    fun togglePeerSilenced() = controller.togglePeerSilenced()
     fun selectOutput(id: Int) = controller.selectOutput(id)
-    fun setVolume(fraction: Float) = controller.setVolume(fraction)
-    fun setBoost(on: Boolean) = controller.setBoost(on)
+    fun setVolume(level: Float) = controller.setVolume(level)
 }
