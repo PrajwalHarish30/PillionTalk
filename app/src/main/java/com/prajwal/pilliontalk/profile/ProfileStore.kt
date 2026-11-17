@@ -6,7 +6,7 @@ import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
 
 /**
- * Your display name: what the other phone shows ("Yapping with Prajwal").
+ * Your display name: what the other phone shows (the name on their tile).
  *
  * Stored in SharedPreferences: Android's simple key-value file, kept between app launches.
  * (Flutter equivalent: the shared_preferences package, which uses this exact thing on Android.)
@@ -30,7 +30,7 @@ class ProfileStore(context: Context) {
     }
 }
 
-/** "Prajwal Harish" → "PH", "prajwal" → "PR". For the avatar circles. */
+/** "Captain Wheelie" → "CW", "wheelie" → "WH". For the avatar circles. */
 fun initialsOf(name: String): String {
     val words = name.trim().split(Regex("\\s+")).filter { it.isNotEmpty() }
     return when {

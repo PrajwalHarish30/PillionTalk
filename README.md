@@ -13,7 +13,8 @@ Phase 1, nearly done. What works today:
 - **Start a ride / Join a ride:** the rider's phone creates a Wi-Fi Direct group (preferring 5 GHz) and the pillion's phone joins it.
 - **Two-way voice** over UDP, routed to a Bluetooth headset when one is connected. It keeps running in the background through a foreground service.
 - **Names:** each rider sets a name once, and it's shown on the other phone.
-- **Ride screen** (pure mono, light and dark): speaking rings around whoever is talking, an output dropdown with a 0–200% volume (above 100% is boost), tap the other person to change their volume or silence them, and a details sheet with the link stats.
+- **Ride screen** (pure mono, light and dark): full-height tiles for you and the other person that light up while they talk, an output dropdown with a 0–200% volume (above 100% is boost), tap the other person to change their volume or silence them, and a details sheet with the link stats.
+- **Sounds** in your headset when you join, when the other person joins or leaves, and when you mute or unmute.
 - **Fun status lines** ("Yapping at full throttle", "Mic's parked"…) shared by the screen and a call-style notification, which has a ride timer and Mute, Speaker and Hang up buttons on the lock screen.
 
 Next: Opus compression, auto-reconnect, QR pairing.

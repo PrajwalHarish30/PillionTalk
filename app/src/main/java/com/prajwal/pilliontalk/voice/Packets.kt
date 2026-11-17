@@ -9,6 +9,7 @@ import java.nio.ByteBuffer
  *   PING:  [type][timestamp: 8 bytes]   "what time is it on your side?"
  *   PONG:  [type][timestamp: 8 bytes]   the same timestamp, sent straight back
  *   HELLO: [type][name: UTF-8 text]     "this is who I am", sent every second
+ *   BYE:   [type]                       "I've ended the ride"
  *
  * The sequence number counts voice packets 0, 1, 2, … (wrapping after 65535). If the receiver
  * sees 41 then 43, it knows packet 42 was lost. UDP doesn't resend lost packets, and for live
@@ -22,6 +23,7 @@ object Packets {
     const val PING: Byte = 2
     const val PONG: Byte = 3
     const val HELLO: Byte = 4
+    const val BYE: Byte = 5
 
     const val VOICE_HEADER_BYTES = 3
 
@@ -35,6 +37,8 @@ object Packets {
     fun ping(timestampMs: Long): ByteArray = ByteBuffer.allocate(9).put(PING).putLong(timestampMs).array()
 
     fun pong(timestampMs: Long): ByteArray = ByteBuffer.allocate(9).put(PONG).putLong(timestampMs).array()
+
+    fun bye(): ByteArray = byteArrayOf(BYE)
 
     fun hello(name: String): ByteArray = byteArrayOf(HELLO) + name.toByteArray(Charsets.UTF_8)
 

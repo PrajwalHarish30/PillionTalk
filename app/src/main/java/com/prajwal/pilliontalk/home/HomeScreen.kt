@@ -153,7 +153,7 @@ fun NameDialog(current: String, onSave: (String) -> Unit, onDismiss: () -> Unit)
                     value = text,
                     onValueChange = { text = it.take(ProfileStore.MAX_NAME_LENGTH) },
                     singleLine = true,
-                    placeholder = { Text("Prajwal") },
+                    placeholder = { Text("Captain Wheelie") },
                     keyboardOptions = KeyboardOptions(capitalization = KeyboardCapitalization.Words, imeAction = ImeAction.Done),
                     keyboardActions = KeyboardActions(onDone = { if (text.isNotBlank()) onSave(text) }),
                 )
@@ -171,7 +171,7 @@ fun NameDialog(current: String, onSave: (String) -> Unit, onDismiss: () -> Unit)
 private fun HomePreview() {
     PillionTalkTheme(dark = true) {
         Surface(color = MaterialTheme.colorScheme.background) {
-            HomeScreen(myName = "Prajwal", onEditName = {}, onPickRole = {})
+            HomeScreen(myName = "Captain Wheelie", onEditName = {}, onPickRole = {})
         }
     }
 }

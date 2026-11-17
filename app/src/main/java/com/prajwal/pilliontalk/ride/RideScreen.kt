@@ -1,7 +1,10 @@
 package com.prajwal.pilliontalk.ride
 
 import android.os.SystemClock
+import androidx.compose.animation.animateColorAsState
+import androidx.compose.foundation.BorderStroke
 import androidx.compose.foundation.layout.Arrangement
+import androidx.compose.foundation.layout.BoxWithConstraints
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
@@ -52,6 +55,7 @@ import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.tooling.preview.Preview
+import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.dp
 import com.prajwal.pilliontalk.profile.initialsOf
 import com.prajwal.pilliontalk.ui.components.Avatar
@@ -108,15 +112,17 @@ fun RideScreen(
             Text(subtitle, style = MaterialTheme.typography.bodyLarge, color = MaterialTheme.colorScheme.onSurfaceVariant)
         }
 
-        Spacer(Modifier.height(24.dp))
-        Tiles(state, voice, myName, onPeerClick = { showPeerSheet = true })
+        Spacer(Modifier.height(20.dp))
+        // weight(1f): the tiles take all the height the header and control bar leave over
+        // (Flutter: Expanded).
+        Tiles(state, voice, myName, onPeerClick = { showPeerSheet = true }, modifier = Modifier.weight(1f))
 
         if (state is RideState.Failed) {
-            Spacer(Modifier.height(20.dp))
+            Spacer(Modifier.height(12.dp))
             Button(onClick = actions.onRetry, modifier = Modifier.fillMaxWidth().height(52.dp)) { Text("Try again") }
         }
 
-        Spacer(Modifier.weight(1f))
+        Spacer(Modifier.height(12.dp))
         ControlBar(state, voice, actions, onDetails = { showDetails = true })
     }
 
@@ -160,20 +166,23 @@ private fun Header(state: RideState) {
     }
 }
 
-/** Two tiles, you and them. */
+/** Two tiles, you and them, stacked and sharing the space equally. */
 @Composable
-private fun Tiles(state: RideState, voice: VoiceStats, myName: String, onPeerClick: () -> Unit) {
+private fun Tiles(state: RideState, voice: VoiceStats, myName: String, onPeerClick: () -> Unit, modifier: Modifier = Modifier) {
     val connected = state as? RideState.Connected
     val paired = connected?.paired == true
     val peerName = voice.peerName
+    val peerSpeaking = paired && voice.peerSpeaking && !voice.peerSilenced
 
-    Row(horizontalArrangement = Arrangement.spacedBy(10.dp)) {
+    Column(modifier.fillMaxWidth(), verticalArrangement = Arrangement.spacedBy(10.dp)) {
         Tile(
-            label = "You",
-            avatar = {
+            label = myName.ifBlank { "You" },
+            caption = if (voice.muted) "You · muted" else "You",
+            speaking = voice.meSpeaking,
+            avatar = { size ->
                 Avatar(
                     initials = initialsOf(myName.ifBlank { "You" }),
-                    size = 64.dp,
+                    size = size,
                     speaking = voice.meSpeaking,
                     badge = if (voice.muted) Icons.Rounded.MicOff else null,
                 )
@@ -186,11 +195,17 @@ private fun Tiles(state: RideState, voice: VoiceStats, myName: String, onPeerCli
                 state is RideState.Failed -> "Lost"
                 else -> "Waiting…"
             },
-            avatar = {
+            caption = when {
+                !paired -> if (connected?.link?.role == Role.RIDER) "Your pillion" else "Your rider"
+                voice.peerSilenced -> "Silenced · tap to change"
+                else -> "Tap for their volume"
+            },
+            speaking = peerSpeaking,
+            avatar = { size ->
                 Avatar(
                     initials = if (paired && peerName != null) initialsOf(peerName) else "?",
-                    size = 64.dp,
-                    speaking = paired && voice.peerSpeaking && !voice.peerSilenced,
+                    size = size,
+                    speaking = peerSpeaking,
                     waiting = !paired,
                     badge = if (voice.peerSilenced) Icons.AutoMirrored.Rounded.VolumeOff else null,
                 )
@@ -201,23 +216,44 @@ private fun Tiles(state: RideState, voice: VoiceStats, myName: String, onPeerCli
     }
 }
 
+/**
+ * One person's tile. Like a video-call tile without the video: the avatar sits in the middle,
+ * the name underneath, and the tile's outline lights up while they talk.
+ * BoxWithConstraints tells us how big the tile ended up, so the avatar can grow on tall phones
+ * and shrink on short ones (Flutter: LayoutBuilder).
+ */
 @Composable
-private fun Tile(label: String, avatar: @Composable () -> Unit, modifier: Modifier = Modifier, onClick: (() -> Unit)? = null) {
+private fun Tile(
+    label: String,
+    caption: String,
+    speaking: Boolean,
+    avatar: @Composable (Dp) -> Unit,
+    modifier: Modifier = Modifier,
+    onClick: (() -> Unit)? = null,
+) {
+    val outline by animateColorAsState(
+        if (speaking) MaterialTheme.colorScheme.primary else Color.Transparent,
+        label = "outline",
+    )
+    val shape = RoundedCornerShape(24.dp)
     val content: @Composable () -> Unit = {
-        Column(
-            Modifier.fillMaxWidth().padding(vertical = 22.dp),
-            horizontalAlignment = Alignment.CenterHorizontally,
-            verticalArrangement = Arrangement.spacedBy(10.dp),
-        ) {
-            avatar()
-            Text(label, style = MaterialTheme.typography.bodyMedium, maxLines = 1)
+        BoxWithConstraints(Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
+            // Leave room for the name lines and padding; never smaller than 56 dp or bigger than 120 dp.
+            val avatarSize = (maxHeight - 92.dp).coerceIn(56.dp, 120.dp)
+            Column(horizontalAlignment = Alignment.CenterHorizontally, verticalArrangement = Arrangement.spacedBy(10.dp)) {
+                avatar(avatarSize)
+                Column(horizontalAlignment = Alignment.CenterHorizontally) {
+                    Text(label, style = MaterialTheme.typography.titleMedium, maxLines = 1)
+                    Text(caption, style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant, maxLines = 1)
+                }
+            }
         }
     }
-    val shape = RoundedCornerShape(20.dp)
+    val border = BorderStroke(2.dp, outline)
     if (onClick != null) {
-        Surface(onClick = onClick, shape = shape, color = MaterialTheme.colorScheme.surface, modifier = modifier) { content() }
+        Surface(onClick = onClick, shape = shape, color = MaterialTheme.colorScheme.surface, border = border, modifier = modifier.fillMaxWidth()) { content() }
     } else {
-        Surface(shape = shape, color = MaterialTheme.colorScheme.surface, modifier = modifier) { content() }
+        Surface(shape = shape, color = MaterialTheme.colorScheme.surface, border = border, modifier = modifier.fillMaxWidth()) { content() }
     }
 }
 
@@ -407,7 +443,7 @@ private fun labelFor(output: AudioOutput): String = when (output.kind) {
 private val previewLink = LinkInfo(Role.RIDER, "DIRECT-PT-PillionTalk", 5745, "192.168.49.1", "192.168.49.1", "p2p-wlan0-0", null)
 private val previewVoice = VoiceStats(
     running = true,
-    peerName = "Prajwal",
+    peerName = "Captain Wheelie",
     meSpeaking = true,
     outputs = listOf(AudioOutput(1, OutputKind.BLUETOOTH, "Helmet BT"), AudioOutput(2, OutputKind.EARPIECE, "Phone")),
     output = AudioOutput(1, OutputKind.BLUETOOTH, "Helmet BT"),
@@ -420,7 +456,7 @@ private val previewVoice = VoiceStats(
 private fun TalkingDarkPreview() {
     PillionTalkTheme(dark = true) {
         Surface(color = MaterialTheme.colorScheme.background) {
-            RideScreen(RideState.Connected(previewLink, listOf("Redmi"), SystemClock.elapsedRealtime() - 60_000), previewVoice, "Harish", RideActions())
+            RideScreen(RideState.Connected(previewLink, listOf("Redmi"), SystemClock.elapsedRealtime() - 60_000), previewVoice, "Lil Pillion", RideActions())
         }
     }
 }
@@ -430,7 +466,7 @@ private fun TalkingDarkPreview() {
 private fun MutedLightPreview() {
     PillionTalkTheme(dark = false) {
         Surface(color = MaterialTheme.colorScheme.background) {
-            RideScreen(RideState.Connected(previewLink, listOf("Redmi"), SystemClock.elapsedRealtime() - 60_000), previewVoice.copy(muted = true, meSpeaking = false), "Harish", RideActions())
+            RideScreen(RideState.Connected(previewLink, listOf("Redmi"), SystemClock.elapsedRealtime() - 60_000), previewVoice.copy(muted = true, meSpeaking = false), "Lil Pillion", RideActions())
         }
     }
 }
@@ -440,7 +476,7 @@ private fun MutedLightPreview() {
 private fun WaitingPreview() {
     PillionTalkTheme(dark = true) {
         Surface(color = MaterialTheme.colorScheme.background) {
-            RideScreen(RideState.Connected(previewLink, emptyList(), SystemClock.elapsedRealtime()), VoiceStats(running = true), "Harish", RideActions())
+            RideScreen(RideState.Connected(previewLink, emptyList(), SystemClock.elapsedRealtime()), VoiceStats(running = true), "Lil Pillion", RideActions())
         }
     }
 }

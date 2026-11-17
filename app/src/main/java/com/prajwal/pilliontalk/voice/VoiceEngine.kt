@@ -24,6 +24,7 @@ import java.net.SocketAddress
 import java.nio.ByteBuffer
 import java.nio.ByteOrder
 import java.util.concurrent.ArrayBlockingQueue
+import java.util.concurrent.ConcurrentLinkedQueue
 import java.util.concurrent.atomic.AtomicInteger
 import java.util.concurrent.atomic.AtomicLong
 import kotlin.math.roundToInt
@@ -83,6 +84,8 @@ data class VoiceStats(
  *   2. receive:  wait for packets → voice goes into the jitter buffer, pings get answered
  *   3. playback: take 20 ms from the jitter buffer → play it (covering any gaps)
  *   4. control:  ping and say hello every second, check link health, publish stats
+ *
+ * The playback thread also mixes in the little sounds from [Cue] (joined, left, mute…).
  */
 @SuppressLint("MissingPermission") // The UI asks for RECORD_AUDIO before a ride starts.
 class VoiceEngine(context: Context) {
@@ -116,6 +119,9 @@ class VoiceEngine(context: Context) {
     @Volatile private var startedAt = 0L
     @Volatile private var weakSignal = false
     @Volatile private var error: String? = null
+
+    /** Sounds waiting to be played, in order. The playback thread mixes them into the voice. */
+    private val cues = ConcurrentLinkedQueue<Cue>()
 
     private var socket: DatagramSocket? = null
     private val threads = mutableListOf<Thread>()
@@ -161,6 +167,8 @@ class VoiceEngine(context: Context) {
 
         running = true
         startedAt = SystemClock.elapsedRealtime()
+        cues.clear()
+        playCue(Cue.YOU_JOINED)
         threads += audioThread("capture", ::captureLoop)
         threads += audioThread("receive", ::receiveLoop)
         threads += audioThread("playback", ::playbackLoop)
@@ -170,6 +178,9 @@ class VoiceEngine(context: Context) {
 
     @Synchronized
     fun stop() {
+        // Say goodbye first, so the other phone plays "left" right away instead of waiting to
+        // notice the silence. Sent three times because UDP may drop any single packet.
+        peer?.let { to -> if (running) repeat(3) { send(Packets.bye(), to) } }
         running = false
         socket?.close() // unblocks the receive thread
         threads.forEach { it.join(1_000) }
@@ -182,8 +193,14 @@ class VoiceEngine(context: Context) {
     }
 
     fun setMuted(value: Boolean) {
+        if (value != muted && running) playCue(if (value) Cue.MUTED else Cue.UNMUTED)
         muted = value
         publishStats()
+    }
+
+    /** Queue a sound. Safe from any thread. */
+    fun playCue(cue: Cue) {
+        cues.offer(cue)
     }
 
     /** Stop playing the other person's audio (they keep hearing you). */
@@ -289,6 +306,7 @@ class VoiceEngine(context: Context) {
                 Packets.PING -> send(Packets.pong(Packets.timestampOf(buffer)), packet.socketAddress)
                 Packets.PONG -> lastPingMs.set(SystemClock.elapsedRealtime() - Packets.timestampOf(buffer))
                 Packets.HELLO -> peerName = Packets.nameOf(buffer, packet.length).ifBlank { null }
+                Packets.BYE -> lastHeardAt = 0 // they ended the ride: treat them as gone now
             }
         }
     }
@@ -312,13 +330,20 @@ class VoiceEngine(context: Context) {
         var concealed = 0      // how many frames in a row we've had to make up
         var buffering = true   // waiting for the jitter buffer to fill to TARGET_FRAMES
 
+        val mixer = CueMixer()
+        // Every frame goes out through here, so cues get mixed into voice and silence alike.
+        fun emit(frame: ByteArray) {
+            val out = mixer.mixInto(frame)
+            track.write(out, 0, out.size)
+        }
+
         track.play()
         try {
             while (running) {
                 // write() blocks until there's room, so every pass of this loop takes ~20 ms.
                 if (buffering) {
                     if (jitterBuffer.size >= TARGET_FRAMES) buffering = false
-                    track.write(silence, 0, FRAME_BYTES)
+                    emit(silence)
                     continue
                 }
 
@@ -330,7 +355,7 @@ class VoiceEngine(context: Context) {
                             boostGain != 1f -> scale(frame, boostGain)
                             else -> frame
                         }
-                        track.write(out, 0, out.size)
+                        emit(out)
                         lastFrame = frame
                         concealed = 0
                     }
@@ -339,7 +364,7 @@ class VoiceEngine(context: Context) {
                     lastFrame != null && concealed < MAX_CONCEALED_FRAMES -> {
                         concealed++
                         lastFrame = scale(lastFrame, 0.5f)
-                        track.write(if (peerSilenced) silence else lastFrame, 0, lastFrame.size)
+                        emit(if (peerSilenced) silence else lastFrame)
                         if (isTalking()) underruns.incrementAndGet()
                     }
                     // Still nothing: the other side went quiet (muted) or the link hiccuped.
@@ -348,7 +373,7 @@ class VoiceEngine(context: Context) {
                         if (isTalking()) underruns.incrementAndGet()
                         lastFrame = null
                         buffering = true
-                        track.write(silence, 0, FRAME_BYTES)
+                        emit(silence)
                     }
                 }
             }
@@ -362,7 +387,15 @@ class VoiceEngine(context: Context) {
         var tick = 0
         var lastReceived = 0
         var lastLost = 0
+        var peerPresent = false
         while (running) {
+            // Did the other person just arrive, or just disappear? Play a sound on the change.
+            val present = lastHeardAt != 0L && SystemClock.elapsedRealtime() - lastHeardAt < PEER_GONE_MS
+            if (present != peerPresent) {
+                peerPresent = present
+                playCue(if (present) Cue.PEER_JOINED else Cue.PEER_LEFT)
+            }
+
             // Every second: say hello and ping. Every 2 seconds: judge how healthy the link is.
             if (tick % 2 == 0) {
                 peer?.let {
@@ -478,6 +511,32 @@ class VoiceEngine(context: Context) {
         )
     }
 
+    /**
+     * Plays queued cues across as many 20 ms frames as they need. Only the playback thread uses
+     * it, so it doesn't need to be thread-safe itself.
+     */
+    private inner class CueMixer {
+        private var current: ShortArray? = null
+        private var position = 0
+
+        /** Returns [frame] with the next slice of the current cue added on top (a copy, if anything was added). */
+        fun mixInto(frame: ByteArray): ByteArray {
+            val cue = current ?: cues.poll()?.samples?.also { current = it; position = 0 } ?: return frame
+            val out = frame.copyOf()
+            val samples = ByteBuffer.wrap(out).order(ByteOrder.LITTLE_ENDIAN).asShortBuffer()
+            var i = 0
+            while (i < samples.limit() && position < cue.size) {
+                // Adding two sounds = adding their samples. Clamp so loud voice + cue can't wrap.
+                val mixed = (samples.get(i) + cue[position]).coerceIn(Short.MIN_VALUE.toInt(), Short.MAX_VALUE.toInt())
+                samples.put(i, mixed.toShort())
+                i++
+                position++
+            }
+            if (position >= cue.size) current = null // done: the next frame picks up the next cue
+            return out
+        }
+    }
+
     private fun resetCounters() {
         listOf(sent, received, lost, underruns).forEach { it.set(0) }
         lastPingMs.set(-1)
@@ -514,6 +573,7 @@ class VoiceEngine(context: Context) {
         const val MAX_VOLUME = 2f         // 200%: phone at max, plus ×2 boost (+6 dB)
         private const val SPEECH_RMS = 700.0           // loudness that counts as talking (out of 32,768)
         private const val SPEAKING_HANGOVER_MS = 350L  // keep the ring lit briefly between words
+        private const val PEER_GONE_MS = 3_000L        // nothing heard for this long = they've left
         private const val ENCODING = AudioFormat.ENCODING_PCM_16BIT
     }
 }

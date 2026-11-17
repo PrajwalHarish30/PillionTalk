@@ -39,7 +39,7 @@ object RideCopy {
         }
     }
 
-    /** The facts line under the title, e.g. "Prajwal · Helmet BT". */
+    /** The facts line under the title, e.g. "Captain Wheelie · Helmet BT". */
     fun subtitle(state: RideState, voice: VoiceStats): String = when (state) {
         is RideState.Connected -> listOfNotNull(
             voice.peerName ?: if (state.paired) otherSeat(state.link.role) else null,
