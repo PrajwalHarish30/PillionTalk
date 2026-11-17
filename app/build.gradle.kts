@@ -14,8 +14,8 @@ android {
         applicationId = "com.prajwal.pilliontalk" // the app's unique ID on a phone / Play Store
         minSdk = 31     // Android 12: oldest version we install on (both test phones are 12+)
         targetSdk = 36  // the version whose behaviour rules we've tested against
-        versionCode = 8       // must go up with every build you install over an older one
-        versionName = "0.8.0" // what humans see
+        versionCode = 9       // must go up with every build you install over an older one
+        versionName = "0.8.1" // what humans see
     }
 
     // Every APK must be signed, and Android only installs an update over an existing app if

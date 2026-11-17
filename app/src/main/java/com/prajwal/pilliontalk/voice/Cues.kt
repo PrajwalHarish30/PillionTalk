@@ -26,6 +26,9 @@ enum class Cue(val samples: ShortArray) {
     /** The other person left or dropped off: falling. */
     PEER_LEFT(notes(Note(1318.5, 110), Note(880.0, 110), Note(587.3, 240))),
 
+    /** You ended the ride: a soft two-note "bye", lower than when someone else leaves. */
+    YOU_LEFT(notes(Note(784.0, 120), Note(523.3, 280))),
+
     /** Mic off: two notes going down. */
     MUTED(notes(Note(880.0, 80), Note(587.3, 130))),
 

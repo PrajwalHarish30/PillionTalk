@@ -3,6 +3,7 @@ package com.prajwal.pilliontalk.ride
 import android.content.Context
 import android.os.SystemClock
 import com.prajwal.pilliontalk.profile.ProfileStore
+import com.prajwal.pilliontalk.voice.Cue
 import com.prajwal.pilliontalk.voice.VoiceEngine
 import com.prajwal.pilliontalk.voice.VoiceStats
 import com.prajwal.pilliontalk.wifidirect.LinkInfo
@@ -106,7 +107,7 @@ class RideController(context: Context, private val profile: ProfileStore) {
             val peers = link.peers(info.role)
             if (peers == null) {
                 val who = voice.value.peerName ?: if (info.role == Role.RIDER) "Your pillion" else "Your rider"
-                stopVoice()
+                stopVoice(Cue.PEER_LEFT)
                 _state.value = RideState.Failed(info.role, "$who took a detour. The connection was lost.")
                 return
             }
@@ -138,7 +139,7 @@ class RideController(context: Context, private val profile: ProfileStore) {
     fun end() {
         rideJob?.cancel()
         scope.launch {
-            stopVoice()
+            stopVoice(Cue.YOU_LEFT)
             runCatching { link.leave() }
             _state.value = RideState.Idle
         }
@@ -150,5 +151,5 @@ class RideController(context: Context, private val profile: ProfileStore) {
     }
 
     // stop() waits for the audio threads to finish, so keep it off the main thread.
-    private suspend fun stopVoice() = withContext(Dispatchers.IO) { voiceEngine.stop() }
+    private suspend fun stopVoice(goodbye: Cue? = null) = withContext(Dispatchers.IO) { voiceEngine.stop(goodbye) }
 }

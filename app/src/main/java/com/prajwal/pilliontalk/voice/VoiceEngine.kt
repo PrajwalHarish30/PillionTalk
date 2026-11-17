@@ -122,6 +122,10 @@ class VoiceEngine(context: Context) {
 
     /** Sounds waiting to be played, in order. The playback thread mixes them into the voice. */
     private val cues = ConcurrentLinkedQueue<Cue>()
+    private val mixer = CueMixer()
+
+    /** Whether we're currently hearing from the other phone (drives the joined/left sounds). */
+    @Volatile private var peerPresent = false
 
     private var socket: DatagramSocket? = null
     private val threads = mutableListOf<Thread>()
@@ -168,6 +172,8 @@ class VoiceEngine(context: Context) {
         running = true
         startedAt = SystemClock.elapsedRealtime()
         cues.clear()
+        mixer.reset()
+        peerPresent = false
         playCue(Cue.YOU_JOINED)
         threads += audioThread("capture", ::captureLoop)
         threads += audioThread("receive", ::receiveLoop)
@@ -176,11 +182,21 @@ class VoiceEngine(context: Context) {
         threads.forEach { it.start() }
     }
 
+    /**
+     * Stop talking. [goodbye] is a last sound to play before the audio shuts down: YOU_LEFT when
+     * you hang up, PEER_LEFT when the link to the other phone was lost.
+     */
     @Synchronized
-    fun stop() {
-        // Say goodbye first, so the other phone plays "left" right away instead of waiting to
-        // notice the silence. Sent three times because UDP may drop any single packet.
-        peer?.let { to -> if (running) repeat(3) { send(Packets.bye(), to) } }
+    fun stop(goodbye: Cue? = null) {
+        if (running) {
+            // Say bye first, so the other phone plays "left" right away instead of waiting to
+            // notice the silence. Sent three times because UDP may drop any single packet.
+            peer?.let { to -> repeat(3) { send(Packets.bye(), to) } }
+            // Don't play "they left" twice: skip it if it already played when they went quiet.
+            if (goodbye != null && !(goodbye == Cue.PEER_LEFT && !peerPresent)) playCue(goodbye)
+            peerPresent = false // so the control loop doesn't queue its own "left" while we wait
+            finishCues()
+        }
         running = false
         socket?.close() // unblocks the receive thread
         threads.forEach { it.join(1_000) }
@@ -196,6 +212,18 @@ class VoiceEngine(context: Context) {
         if (value != muted && running) playCue(if (value) Cue.MUTED else Cue.UNMUTED)
         muted = value
         publishStats()
+    }
+
+    /**
+     * Wait (up to 1.5 s) for queued sounds to finish, so stopping doesn't cut one off halfway.
+     * Called from stop(), which already runs off the main thread, so sleeping here is fine.
+     */
+    private fun finishCues() {
+        val deadline = SystemClock.elapsedRealtime() + 1_500
+        while ((cues.isNotEmpty() || mixer.busy) && SystemClock.elapsedRealtime() < deadline) {
+            Thread.sleep(20)
+        }
+        Thread.sleep(150) // the last bit is still in the speaker's buffer; let it drain
     }
 
     /** Queue a sound. Safe from any thread. */
@@ -330,7 +358,6 @@ class VoiceEngine(context: Context) {
         var concealed = 0      // how many frames in a row we've had to make up
         var buffering = true   // waiting for the jitter buffer to fill to TARGET_FRAMES
 
-        val mixer = CueMixer()
         // Every frame goes out through here, so cues get mixed into voice and silence alike.
         fun emit(frame: ByteArray) {
             val out = mixer.mixInto(frame)
@@ -387,7 +414,6 @@ class VoiceEngine(context: Context) {
         var tick = 0
         var lastReceived = 0
         var lastLost = 0
-        var peerPresent = false
         while (running) {
             // Did the other person just arrive, or just disappear? Play a sound on the change.
             val present = lastHeardAt != 0L && SystemClock.elapsedRealtime() - lastHeardAt < PEER_GONE_MS
@@ -516,8 +542,15 @@ class VoiceEngine(context: Context) {
      * it, so it doesn't need to be thread-safe itself.
      */
     private inner class CueMixer {
-        private var current: ShortArray? = null
+        @Volatile private var current: ShortArray? = null
         private var position = 0
+
+        /** A sound is partway through playing. Read by stop() on another thread. */
+        val busy: Boolean get() = current != null
+
+        fun reset() {
+            current = null
+        }
 
         /** Returns [frame] with the next slice of the current cue added on top (a copy, if anything was added). */
         fun mixInto(frame: ByteArray): ByteArray {
