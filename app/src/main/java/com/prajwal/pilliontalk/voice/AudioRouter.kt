@@ -65,7 +65,12 @@ class AudioRouter(private val context: Context) {
         onChanged()
     }
 
+    /** Whether start() has run without a matching stop(). */
+    private var active = false
+
     fun start() {
+        if (active) return
+        active = true
         userChoice = null
         audioManager.mode = AudioManager.MODE_IN_COMMUNICATION
         audioManager.registerAudioDeviceCallback(deviceCallback, mainHandler)
@@ -73,7 +78,13 @@ class AudioRouter(private val context: Context) {
         refresh()
     }
 
+    /**
+     * Undo start(). Safe to call when start() never ran (e.g. the ride ended while still
+     * searching): Android throws if you remove a listener you never added.
+     */
     fun stop() {
+        if (!active) return
+        active = false
         audioManager.unregisterAudioDeviceCallback(deviceCallback)
         audioManager.removeOnCommunicationDeviceChangedListener(deviceChangedListener)
         audioManager.clearCommunicationDevice()

@@ -39,6 +39,19 @@ android {
     }
 
     buildTypes {
+        // The debug build is what goes to the phones, so shrink it like a release build.
+        // R8 (Android's shrinker) follows the code from its entry points and drops everything
+        // never reached: most of the ~7,000 icons in material-icons-extended, unused library
+        // code, and resources nothing refers to. Flutter does the same in release builds
+        // ("tree shaking"). This took the APK from about 58 MB to a few MB.
+        debug {
+            isMinifyEnabled = true
+            isShrinkResources = true
+            proguardFiles(
+                getDefaultProguardFile("proguard-android-optimize.txt"),
+                "proguard-rules.pro",
+            )
+        }
         release {
             isMinifyEnabled = false
             proguardFiles(

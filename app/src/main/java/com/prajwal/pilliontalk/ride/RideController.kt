@@ -70,12 +70,17 @@ class RideController(context: Context, private val profile: ProfileStore) {
 
     private var rideJob: Job? = null
 
+    /** Shutting the last ride down (goodbye sound, leaving the Wi-Fi group), after the screen has moved on. */
+    private var teardownJob: Job? = null
+
     fun start(role: Role) {
         rideJob?.cancel()
         // Set this right away (not inside the coroutine), so RideService never sees a stale "Idle"
         // when it starts up and stops itself by mistake.
         _state.value = RideState.Connecting(role)
+        val previousTeardown = teardownJob
         rideJob = scope.launch {
+            previousTeardown?.join() // a new ride can't start until the old one has let go of Wi-Fi and audio
             val info = try {
                 if (role == Role.RIDER) link.host() else link.join()
             } catch (e: CancellationException) {
@@ -107,8 +112,8 @@ class RideController(context: Context, private val profile: ProfileStore) {
             val peers = link.peers(info.role)
             if (peers == null) {
                 val who = voice.value.peerName ?: if (info.role == Role.RIDER) "Your pillion" else "Your rider"
-                stopVoice(Cue.PEER_LEFT)
                 _state.value = RideState.Failed(info.role, "$who took a detour. The connection was lost.")
+                teardownJob = scope.launch { stopVoice(Cue.PEER_LEFT) }
                 return
             }
             _state.value = RideState.Connected(info, peers, since)
@@ -136,12 +141,18 @@ class RideController(context: Context, private val profile: ProfileStore) {
     /** 0.0–2.0: up to 1.0 is the phone's volume, above that is boost. */
     fun setVolume(level: Float) = voiceEngine.setVolume(level)
 
+    /**
+     * End the ride. The screen goes back home straight away; the goodbye sound and leaving the
+     * Wi-Fi group (which can take a second or two) carry on in the background.
+     */
     fun end() {
         rideJob?.cancel()
-        scope.launch {
+        _state.value = RideState.Idle
+        val previousTeardown = teardownJob
+        teardownJob = scope.launch {
+            previousTeardown?.join()
             stopVoice(Cue.YOU_LEFT)
             runCatching { link.leave() }
-            _state.value = RideState.Idle
         }
     }
 
