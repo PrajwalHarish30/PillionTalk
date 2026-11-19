@@ -25,7 +25,7 @@ class RideViewModel(app: Application) : AndroidViewModel(app) {
 
     fun setMyName(name: String) = pillion.profile.setName(name)
     fun onAppResumed() = pillion.updater.onResume()
-    fun installUpdate() = pillion.updater.install()
+    fun onUpdateAction() = pillion.updater.onBannerAction()
 
     fun start(role: Role) {
         // Start the foreground service first: it's what lets voice keep going in the background.

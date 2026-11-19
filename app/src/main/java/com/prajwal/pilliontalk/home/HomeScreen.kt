@@ -63,7 +63,7 @@ fun HomeScreen(
     modifier: Modifier = Modifier,
     update: UpdateState = UpdateState.None,
     versionName: String = "",
-    onInstallUpdate: () -> Unit = {},
+    onUpdateAction: () -> Unit = {},
 ) {
     Column(
         modifier = modifier.fillMaxSize().padding(horizontal = 20.dp, vertical = 16.dp),
@@ -86,7 +86,7 @@ fun HomeScreen(
 
         // AnimatedVisibility slides the banner in when an update shows up (Flutter: AnimatedSize + a conditional).
         AnimatedVisibility(visible = update != UpdateState.None) {
-            UpdateBanner(update, onInstallUpdate, Modifier.padding(top = 4.dp))
+            UpdateBanner(update, onUpdateAction, Modifier.padding(top = 4.dp))
         }
 
         Spacer(Modifier.height(8.dp))
@@ -154,20 +154,22 @@ private fun RoleRow(icon: ImageVector, title: String, subtitle: String, onClick:
  * The last state shown is kept while it slides out, so the text doesn't vanish mid-animation.
  */
 @Composable
-private fun UpdateBanner(state: UpdateState, onInstall: () -> Unit, modifier: Modifier = Modifier) {
+private fun UpdateBanner(state: UpdateState, onAction: () -> Unit, modifier: Modifier = Modifier) {
     var shown by remember { mutableStateOf(state) }
     if (state != UpdateState.None) shown = state
 
     val (title, detail) = when (val s = shown) {
-        is UpdateState.Available -> "Update available · v${s.versionName}" to s.notes
+        is UpdateState.WaitingForWifi -> "Update v${s.versionName} · waiting for Wi-Fi" to s.notes
+        is UpdateState.Downloading -> "Downloading v${s.versionName} · ${(s.progress * 100).toInt()}%" to "Carries on if you leave the app."
+        is UpdateState.Ready -> "Update ready · v${s.versionName}" to s.notes
         UpdateState.NeedsPermission -> "One more step" to "Switch on \"Allow from this source\", then come back."
-        is UpdateState.Downloading -> "Downloading update · ${(s.progress * 100).toInt()}%" to "Keep the app open."
         UpdateState.Installing -> "Installing…" to "The app will restart."
         is UpdateState.Failed -> "Couldn't update" to s.message
         UpdateState.None -> "" to ""
     }
     val buttonLabel = when (shown) {
-        is UpdateState.Available -> "Install"
+        is UpdateState.WaitingForWifi -> "Download now"
+        is UpdateState.Ready -> "Install"
         UpdateState.NeedsPermission, is UpdateState.Failed -> "Try again"
         else -> null
     }
@@ -183,7 +185,7 @@ private fun UpdateBanner(state: UpdateState, onInstall: () -> Unit, modifier: Mo
                     }
                 }
                 if (buttonLabel != null) {
-                    Button(onClick = onInstall) { Text(buttonLabel) }
+                    Button(onClick = onAction) { Text(buttonLabel) }
                 }
             }
             val progress = (shown as? UpdateState.Downloading)?.progress
@@ -236,7 +238,7 @@ private fun HomePreview() {
                 myName = "Captain Wheelie",
                 onEditName = {},
                 onPickRole = {},
-                update = UpdateState.Available("0.9.14", "Full-height tiles and join/leave sounds"),
+                update = UpdateState.Ready("0.9.14", "Full-height tiles and join/leave sounds"),
                 versionName = "0.9.12",
             )
         }

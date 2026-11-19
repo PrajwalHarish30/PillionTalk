@@ -1,21 +1,34 @@
 package com.prajwal.pilliontalk.update
 
+import android.Manifest
+import android.app.DownloadManager
+import android.app.NotificationChannel
+import android.app.NotificationManager
 import android.app.PendingIntent
 import android.content.BroadcastReceiver
 import android.content.Context
 import android.content.Intent
 import android.content.pm.PackageInstaller
+import android.content.pm.PackageManager
 import android.net.Uri
 import android.os.SystemClock
 import android.provider.Settings
+import androidx.core.app.NotificationCompat
+import androidx.core.content.ContextCompat
 import androidx.core.content.IntentCompat
+import androidx.core.content.edit
+import com.prajwal.pilliontalk.MainActivity
 import com.prajwal.pilliontalk.PillionTalkApplication
+import com.prajwal.pilliontalk.R
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.Job
 import kotlinx.coroutines.SupervisorJob
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
+import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import org.json.JSONObject
@@ -27,10 +40,12 @@ import java.net.URL
 sealed interface UpdateState {
     /** Up to date, offline, or not checked yet. Shows nothing. */
     data object None : UpdateState
-    data class Available(val versionName: String, val notes: String) : UpdateState
+    /** Found an update, but it only downloads by itself on Wi-Fi. */
+    data class WaitingForWifi(val versionName: String, val notes: String) : UpdateState
+    data class Downloading(val versionName: String, val progress: Float) : UpdateState
+    data class Ready(val versionName: String, val notes: String) : UpdateState
     /** Waiting for you to switch on "Allow from this source" in Settings. */
     data object NeedsPermission : UpdateState
-    data class Downloading(val progress: Float) : UpdateState
     data object Installing : UpdateState
     data class Failed(val message: String) : UpdateState
 }
@@ -38,26 +53,31 @@ sealed interface UpdateState {
 /**
  * Keeps the app up to date from GitHub, without the Play Store.
  *
- * 1. check(): download the small version.json that GitHub Actions publishes next to the APK
- *    in the "latest-debug" release, and compare its versionCode with ours.
- * 2. install(): download the APK and hand it to Android's PackageInstaller. Android checks it's
- *    signed with the same key as the installed app (the debug key in the repo), then replaces it.
+ * 1. check(): read the small version.json that GitHub Actions publishes next to the APK, and
+ *    compare its versionCode with ours.
+ * 2. If it's newer, hand the APK download to Android's DownloadManager: the same system service
+ *    a browser uses. Android does the downloading, so it carries on if you leave the app or
+ *    Android closes it, and shows progress in the notification shade. It waits for Wi-Fi
+ *    unless you tap "Download now".
+ * 3. When it's done, DownloadDoneReceiver hears about it and posts "Update ready · Tap to install".
+ * 4. install(): give the APK to Android's PackageInstaller, which checks it's signed with the same
+ *    key as the installed app and replaces it. Once this app installed itself, Android 12+ can
+ *    skip the "Update this app?" prompt.
  *
- * Android always protects you here: an app can only install with the "Install unknown apps"
- * switch on, and it shows a confirmation unless this app installed the current version itself.
- * So the very first update asks; on Android 12+ later ones can go through without a prompt.
- *
- * It lives in PillionTalkApplication (like RideController) because InstallResultReceiver,
- * which Android calls back while installing, needs to reach it too.
+ * Because the app can be closed between these steps, what's in flight (which version, which
+ * download) is saved in SharedPreferences instead of just in memory.
  */
 class Updater(private val context: Context) {
 
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.Main)
+    private val prefs = context.getSharedPreferences("updater", Context.MODE_PRIVATE)
+    private val downloads = context.getSystemService(DownloadManager::class.java)
+
     private val _state = MutableStateFlow<UpdateState>(UpdateState.None)
     val state: StateFlow<UpdateState> = _state.asStateFlow()
 
-    private var latest: Release? = null
     private var lastCheckAt = 0L
+    private var progressJob: Job? = null
 
     /** The version people see, e.g. "0.9.12", for the home screen's footer. */
     val installedVersionName: String =
@@ -66,27 +86,50 @@ class Updater(private val context: Context) {
     private val installedVersionCode: Long =
         context.packageManager.getPackageInfo(context.packageName, 0).longVersionCode
 
+    // --- What's saved between launches ------------------------------------------------------------
+
+    private var pending: Release?
+        get() = if (prefs.contains(KEY_CODE)) {
+            Release(prefs.getLong(KEY_CODE, 0), prefs.getString(KEY_NAME, "").orEmpty(), prefs.getString(KEY_NOTES, "").orEmpty())
+        } else {
+            null
+        }
+        set(value) = prefs.edit {
+            if (value == null) {
+                remove(KEY_CODE); remove(KEY_NAME); remove(KEY_NOTES)
+            } else {
+                putLong(KEY_CODE, value.versionCode); putString(KEY_NAME, value.versionName); putString(KEY_NOTES, value.notes)
+            }
+        }
+
+    private var downloadId: Long
+        get() = prefs.getLong(KEY_DOWNLOAD, -1)
+        set(value) = prefs.edit { putLong(KEY_DOWNLOAD, value) }
+
+    private fun apkFile(release: Release) = File(context.getExternalFilesDir(null), "update-${release.versionCode}.apk")
+
+    // --- The steps ----------------------------------------------------------------------------------
+
     /**
      * Look for a newer build. Called whenever the home screen comes into view; asks GitHub at
      * most every 10 minutes. With no internet it just fails quietly: this app is meant to work offline.
      */
     fun check() {
-        val busy = _state.value is UpdateState.Downloading || _state.value is UpdateState.Installing
-        if (busy || SystemClock.elapsedRealtime() - lastCheckAt < CHECK_EVERY_MS && lastCheckAt != 0L) return
+        if (_state.value is UpdateState.Installing) return
+        refresh() // show what's already in flight right away, before GitHub answers
+        if (lastCheckAt != 0L && SystemClock.elapsedRealtime() - lastCheckAt < CHECK_EVERY_MS) return
         lastCheckAt = SystemClock.elapsedRealtime()
         scope.launch {
-            val release = withContext(Dispatchers.IO) { runCatching { fetchLatest() }.getOrNull() } ?: return@launch
-            latest = release
-            if (release.versionCode > installedVersionCode) {
-                _state.value = UpdateState.Available(release.versionName, release.notes)
-            } else if (_state.value is UpdateState.Available) {
-                _state.value = UpdateState.None
-            }
+            val latest = withContext(Dispatchers.IO) { runCatching { fetchLatest() }.getOrNull() } ?: return@launch
+            if (latest.versionCode <= installedVersionCode) return@launch
+            if (pending?.versionCode != latest.versionCode) startDownload(latest, wifiOnly = true)
+            refresh()
         }
     }
 
-    /** Called when the app comes back to the front: carry on if you just allowed installs in Settings. */
+    /** Called when the app comes back to the front. */
     fun onResume() {
+        // You may have just switched on "Allow from this source": carry on installing.
         if (_state.value == UpdateState.NeedsPermission && context.packageManager.canRequestPackageInstalls()) {
             install()
         } else {
@@ -94,8 +137,95 @@ class Updater(private val context: Context) {
         }
     }
 
+    /** The banner's button. What it does depends on where we are. */
+    fun onBannerAction() {
+        val release = pending ?: return
+        when (_state.value) {
+            is UpdateState.Ready, UpdateState.NeedsPermission -> install()
+            is UpdateState.Failed -> if (apkFile(release).exists()) install() else startDownload(release, wifiOnly = false)
+            is UpdateState.WaitingForWifi -> startDownload(release, wifiOnly = false) // "Download now", on mobile data
+            else -> Unit
+        }
+        refresh()
+    }
+
+    private fun startDownload(release: Release, wifiOnly: Boolean) {
+        // Clear out any earlier download (a different version, or the same one being restarted).
+        if (downloadId != -1L) downloads.remove(downloadId)
+        context.getExternalFilesDir(null)?.listFiles { f -> f.name.startsWith("update-") }?.forEach { it.delete() }
+
+        val request = DownloadManager.Request(Uri.parse(APK_URL))
+            .setTitle("Pillion Talk ${release.versionName}")
+            .setDescription("Downloading update")
+            .setNotificationVisibility(DownloadManager.Request.VISIBILITY_VISIBLE)
+            .setAllowedOverMetered(!wifiOnly) // "metered" = mobile data, which can cost money
+            // The app's own folder: no storage permission needed, and it's deleted with the app.
+            .setDestinationUri(Uri.fromFile(apkFile(release)))
+        pending = release
+        downloadId = downloads.enqueue(request)
+    }
+
+    /**
+     * Ask DownloadManager how the download is going, and set the state to match. While it's
+     * still going, ask again every half second (only while the app is running; the download
+     * itself doesn't need us).
+     */
+    fun refresh() {
+        val release = pending
+        if (release == null || release.versionCode <= installedVersionCode) {
+            // Nothing pending, or we're already running it (the update installed): tidy up.
+            if (release != null) cleanUp()
+            if (_state.value !is UpdateState.Failed) _state.value = UpdateState.None
+            return
+        }
+        if (_state.value == UpdateState.Installing || _state.value == UpdateState.NeedsPermission) return
+
+        val progress = queryDownload()
+        _state.value = when (progress) {
+            is DownloadProgress.Running -> UpdateState.Downloading(release.versionName, progress.fraction)
+            DownloadProgress.WaitingForWifi -> UpdateState.WaitingForWifi(release.versionName, release.notes)
+            DownloadProgress.Done -> UpdateState.Ready(release.versionName, release.notes)
+            DownloadProgress.Failed -> UpdateState.Failed("The download didn't finish")
+        }
+        if (progress is DownloadProgress.Running && progressJob?.isActive != true) {
+            progressJob = scope.launch {
+                while (isActive && _state.value is UpdateState.Downloading) {
+                    delay(500)
+                    refresh()
+                }
+            }
+        }
+    }
+
+    private fun queryDownload(): DownloadProgress {
+        if (pending?.let { apkFile(it).exists() } == true && downloadId == -1L) return DownloadProgress.Done
+        downloads.query(DownloadManager.Query().setFilterById(downloadId)).use { row ->
+            if (!row.moveToFirst()) return DownloadProgress.Failed // removed, e.g. cancelled from the shade
+            val status = row.getInt(row.getColumnIndexOrThrow(DownloadManager.COLUMN_STATUS))
+            val reason = row.getInt(row.getColumnIndexOrThrow(DownloadManager.COLUMN_REASON))
+            val done = row.getLong(row.getColumnIndexOrThrow(DownloadManager.COLUMN_BYTES_DOWNLOADED_SO_FAR))
+            val total = row.getLong(row.getColumnIndexOrThrow(DownloadManager.COLUMN_TOTAL_SIZE_BYTES))
+            return when {
+                status == DownloadManager.STATUS_SUCCESSFUL -> DownloadProgress.Done
+                status == DownloadManager.STATUS_FAILED -> DownloadProgress.Failed
+                status == DownloadManager.STATUS_PAUSED && reason == DownloadManager.PAUSED_QUEUED_FOR_WIFI -> DownloadProgress.WaitingForWifi
+                else -> DownloadProgress.Running(if (total > 0) done.toFloat() / total else 0f)
+            }
+        }
+    }
+
+    /** DownloadDoneReceiver calls this. Runs even if the app was closed (Android starts it for us). */
+    internal fun onDownloadFinished(id: Long) {
+        if (id != downloadId) return
+        refresh()
+        val release = pending ?: return
+        if (_state.value is UpdateState.Ready) notifyReady(release)
+    }
+
     fun install() {
-        val release = latest ?: return
+        val release = pending ?: return
+        val apk = apkFile(release)
+        if (!apk.exists()) return
         if (!context.packageManager.canRequestPackageInstalls()) {
             // Open the "Install unknown apps" switch for this app. onResume() continues from here.
             _state.value = UpdateState.NeedsPermission
@@ -105,62 +235,27 @@ class Updater(private val context: Context) {
             )
             return
         }
+        context.getSystemService(NotificationManager::class.java).cancel(NOTIFICATION_ID)
+        _state.value = UpdateState.Installing
         scope.launch {
             try {
-                _state.value = UpdateState.Downloading(0f)
-                val apk = withContext(Dispatchers.IO) {
-                    download(APK_URL, File(context.cacheDir, "update.apk")) { _state.value = UpdateState.Downloading(it) }
-                }
-                _state.value = UpdateState.Installing
                 withContext(Dispatchers.IO) { startInstall(apk) }
                 // From here Android takes over. If it works, this app is closed and replaced.
             } catch (e: Exception) {
-                _state.value = UpdateState.Failed(e.message ?: "Download failed")
+                _state.value = UpdateState.Failed(e.message ?: "Android couldn't install the update")
             }
         }
     }
 
     /** InstallResultReceiver reports here when the install doesn't go through. */
     internal fun onInstallFinished(status: Int, message: String?) {
-        _state.value = when (status) {
+        if (status == PackageInstaller.STATUS_FAILURE_ABORTED) {
             // You tapped Cancel on Android's prompt: offer the update again.
-            PackageInstaller.STATUS_FAILURE_ABORTED -> latest?.let { UpdateState.Available(it.versionName, it.notes) } ?: UpdateState.None
-            else -> UpdateState.Failed(message ?: "Android couldn't install the update")
+            _state.value = UpdateState.None
+            refresh()
+        } else {
+            _state.value = UpdateState.Failed(message ?: "Android couldn't install the update")
         }
-    }
-
-    private fun fetchLatest(): Release {
-        val json = JSONObject(open(VERSION_URL).inputStream.bufferedReader().use { it.readText() })
-        return Release(
-            versionCode = json.getLong("versionCode"),
-            versionName = json.getString("versionName"),
-            notes = json.optString("notes"),
-        )
-    }
-
-    private fun download(url: String, to: File, onProgress: (Float) -> Unit): File {
-        val connection = open(url)
-        val total = connection.contentLengthLong
-        var done = 0L
-        var lastReported = -1
-        connection.inputStream.use { input ->
-            to.outputStream().use { output ->
-                val buffer = ByteArray(64 * 1024)
-                while (true) {
-                    val read = input.read(buffer)
-                    if (read < 0) break
-                    output.write(buffer, 0, read)
-                    done += read
-                    // Only report whole percents, so the UI isn't flooded with updates.
-                    val percent = if (total > 0) (done * 100 / total).toInt() else 0
-                    if (percent != lastReported) {
-                        lastReported = percent
-                        onProgress(percent / 100f)
-                    }
-                }
-            }
-        }
-        return to
     }
 
     /**
@@ -189,21 +284,84 @@ class Updater(private val context: Context) {
         }
     }
 
-    private fun open(url: String): HttpURLConnection =
-        (URL(url).openConnection() as HttpURLConnection).apply {
+    /** "Update ready · Tap to install". Tapping opens the app, which starts the install. */
+    private fun notifyReady(release: Release) {
+        val allowed = ContextCompat.checkSelfPermission(context, Manifest.permission.POST_NOTIFICATIONS) == PackageManager.PERMISSION_GRANTED
+        if (!allowed) return // the banner in the app still offers it
+        val manager = context.getSystemService(NotificationManager::class.java)
+        manager.createNotificationChannel(NotificationChannel(CHANNEL_ID, "Updates", NotificationManager.IMPORTANCE_DEFAULT))
+        val open = PendingIntent.getActivity(
+            context, 0,
+            Intent(context, MainActivity::class.java)
+                .setAction(ACTION_INSTALL)
+                .addFlags(Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_SINGLE_TOP),
+            PendingIntent.FLAG_IMMUTABLE or PendingIntent.FLAG_UPDATE_CURRENT,
+        )
+        manager.notify(
+            NOTIFICATION_ID,
+            NotificationCompat.Builder(context, CHANNEL_ID)
+                .setSmallIcon(R.drawable.ic_notification)
+                .setContentTitle("Pillion Talk ${release.versionName} is ready")
+                .setContentText("Tap to install. ${release.notes}")
+                .setContentIntent(open)
+                .setAutoCancel(true)
+                .build(),
+        )
+    }
+
+    private fun cleanUp() {
+        if (downloadId != -1L) downloads.remove(downloadId)
+        context.getExternalFilesDir(null)?.listFiles { f -> f.name.startsWith("update-") }?.forEach { it.delete() }
+        downloadId = -1
+        pending = null
+    }
+
+    private fun fetchLatest(): Release {
+        val connection = (URL(VERSION_URL).openConnection() as HttpURLConnection).apply {
             connectTimeout = 8_000
-            readTimeout = 15_000
+            readTimeout = 8_000
             instanceFollowRedirects = true // GitHub redirects release downloads to its file servers
-            if (responseCode !in 200..299) throw IllegalStateException("GitHub said $responseCode")
         }
+        if (connection.responseCode !in 200..299) throw IllegalStateException("GitHub said ${connection.responseCode}")
+        val json = JSONObject(connection.inputStream.bufferedReader().use { it.readText() })
+        return Release(json.getLong("versionCode"), json.getString("versionName"), json.optString("notes"))
+    }
 
     private data class Release(val versionCode: Long, val versionName: String, val notes: String)
 
+    private sealed interface DownloadProgress {
+        data class Running(val fraction: Float) : DownloadProgress
+        data object WaitingForWifi : DownloadProgress
+        data object Done : DownloadProgress
+        data object Failed : DownloadProgress
+    }
+
     companion object {
+        /** The "ready" notification's tap opens MainActivity with this action. */
+        const val ACTION_INSTALL = "com.prajwal.pilliontalk.INSTALL_UPDATE"
+
         private const val RELEASE = "https://github.com/PrajwalHarish30/PillionTalk/releases/download/latest-debug"
         private const val VERSION_URL = "$RELEASE/version.json"
         private const val APK_URL = "$RELEASE/PillionTalk-debug.apk"
         private const val CHECK_EVERY_MS = 10 * 60 * 1000L
+        private const val CHANNEL_ID = "updates"
+        private const val NOTIFICATION_ID = 2 // the ride notification is 1
+        private const val KEY_CODE = "versionCode"
+        private const val KEY_NAME = "versionName"
+        private const val KEY_NOTES = "notes"
+        private const val KEY_DOWNLOAD = "downloadId"
+    }
+}
+
+/**
+ * DownloadManager announces every finished download with a broadcast. Android starts the app
+ * to deliver it if needed, which is how "ready" works even after the app was closed.
+ * Registered in AndroidManifest.xml.
+ */
+class DownloadDoneReceiver : BroadcastReceiver() {
+    override fun onReceive(context: Context, intent: Intent) {
+        val id = intent.getLongExtra(DownloadManager.EXTRA_DOWNLOAD_ID, -1)
+        (context.applicationContext as PillionTalkApplication).updater.onDownloadFinished(id)
     }
 }
 

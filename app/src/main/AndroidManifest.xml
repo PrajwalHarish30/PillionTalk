@@ -87,6 +87,16 @@
             android:name=".update.InstallResultReceiver"
             android:exported="false" />
 
+        <!-- Hears when Android's DownloadManager finishes downloading an update. exported="true"
+             because the broadcast comes from the system's download app, not from us. -->
+        <receiver
+            android:name=".update.DownloadDoneReceiver"
+            android:exported="true">
+            <intent-filter>
+                <action android:name="android.intent.action.DOWNLOAD_COMPLETE" />
+            </intent-filter>
+        </receiver>
+
     </application>
 
 </manifest>

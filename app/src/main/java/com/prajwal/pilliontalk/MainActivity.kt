@@ -1,5 +1,6 @@
 package com.prajwal.pilliontalk
 
+import android.content.Intent
 import android.graphics.Color
 import android.media.AudioManager
 import android.os.Bundle
@@ -8,6 +9,7 @@ import androidx.activity.SystemBarStyle
 import androidx.activity.compose.setContent
 import androidx.activity.enableEdgeToEdge
 import com.prajwal.pilliontalk.ui.theme.PillionTalkTheme
+import com.prajwal.pilliontalk.update.Updater
 
 /**
  * An Activity is one "screen" Android can launch. This is our only one; everything else
@@ -35,6 +37,21 @@ class MainActivity : ComponentActivity() {
             PillionTalkTheme {
                 PillionTalkApp()
             }
+        }
+        handleIntent(intent)
+    }
+
+    // Called instead of onCreate when the app is already open and something launches it again,
+    // like tapping the "update ready" notification.
+    override fun onNewIntent(intent: Intent) {
+        super.onNewIntent(intent)
+        handleIntent(intent)
+    }
+
+    private fun handleIntent(intent: Intent?) {
+        if (intent?.action == Updater.ACTION_INSTALL) {
+            (application as PillionTalkApplication).updater.install()
+            intent.action = null // don't install again if the screen is recreated (e.g. rotation)
         }
     }
 }

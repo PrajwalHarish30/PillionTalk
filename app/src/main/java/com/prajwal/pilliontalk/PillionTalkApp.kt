@@ -170,7 +170,7 @@ fun PillionTalkApp(viewModel: RideViewModel = viewModel()) {
                     myName = myName,
                     update = update,
                     versionName = viewModel.versionName,
-                    onInstallUpdate = viewModel::installUpdate,
+                    onUpdateAction = viewModel::onUpdateAction,
                     onEditName = { showNameDialog = true },
                     onPickRole = ::pickRole,
                     modifier = Modifier.padding(innerPadding),

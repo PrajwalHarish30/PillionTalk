@@ -15,7 +15,7 @@ Phase 1, nearly done. What works today:
 - **Names:** each rider sets a name once, and it's shown on the other phone.
 - **Ride screen** (pure mono, light and dark): full-height tiles for you and the other person that light up while they talk, an output dropdown with a 0–200% volume (above 100% is boost), tap the other person to change their volume or silence them, and a details sheet with the link stats.
 - **Sounds** in your headset when you join or leave, when the other person joins or leaves, and when you mute or unmute.
-- **Updates itself:** when the app opens with internet, it checks GitHub for a newer build and offers to install it.
+- **Updates itself:** when the app opens with internet, it checks GitHub for a newer build, downloads it in the background on Wi-Fi, and offers to install it (in the app and as a notification).
 - **Fun status lines** ("Yapping at full throttle", "Mic's parked"…) shared by the screen and a call-style notification, which has a ride timer and Mute, Speaker and Hang up buttons on the lock screen.
 
 Next: Opus compression, auto-reconnect, QR pairing.
