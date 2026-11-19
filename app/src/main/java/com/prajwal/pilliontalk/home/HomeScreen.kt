@@ -1,5 +1,6 @@
 package com.prajwal.pilliontalk.home
 
+import androidx.compose.animation.AnimatedVisibility
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
@@ -19,8 +20,11 @@ import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.rounded.KeyboardArrowRight
 import androidx.compose.material.icons.rounded.Headphones
+import androidx.compose.material.icons.rounded.SystemUpdate
 import androidx.compose.material.icons.rounded.TwoWheeler
 import androidx.compose.material3.AlertDialog
+import androidx.compose.material3.Button
+import androidx.compose.material3.LinearProgressIndicator
 import androidx.compose.material3.Icon
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedTextField
@@ -30,6 +34,7 @@ import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.remember
 import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
@@ -46,6 +51,7 @@ import com.prajwal.pilliontalk.profile.initialsOf
 import com.prajwal.pilliontalk.ui.components.Avatar
 import com.prajwal.pilliontalk.ui.components.SectionLabel
 import com.prajwal.pilliontalk.ui.theme.PillionTalkTheme
+import com.prajwal.pilliontalk.update.UpdateState
 import com.prajwal.pilliontalk.wifidirect.Role
 
 /** First screen: your name, and start or join a ride. */
@@ -55,6 +61,9 @@ fun HomeScreen(
     onEditName: () -> Unit,
     onPickRole: (Role) -> Unit,
     modifier: Modifier = Modifier,
+    update: UpdateState = UpdateState.None,
+    versionName: String = "",
+    onInstallUpdate: () -> Unit = {},
 ) {
     Column(
         modifier = modifier.fillMaxSize().padding(horizontal = 20.dp, vertical = 16.dp),
@@ -75,6 +84,11 @@ fun HomeScreen(
             color = MaterialTheme.colorScheme.onSurfaceVariant,
         )
 
+        // AnimatedVisibility slides the banner in when an update shows up (Flutter: AnimatedSize + a conditional).
+        AnimatedVisibility(visible = update != UpdateState.None) {
+            UpdateBanner(update, onInstallUpdate, Modifier.padding(top = 4.dp))
+        }
+
         Spacer(Modifier.height(8.dp))
         SectionLabel("Start or join")
 
@@ -93,7 +107,7 @@ fun HomeScreen(
 
         Spacer(Modifier.weight(1f))
         Text(
-            "Works offline · no SIM or data needed",
+            if (versionName.isEmpty()) "Works offline · no SIM or data needed" else "Works offline · no SIM or data needed · v$versionName",
             style = MaterialTheme.typography.bodySmall,
             color = MaterialTheme.colorScheme.onSurfaceVariant,
             textAlign = TextAlign.Center,
@@ -135,6 +149,53 @@ private fun RoleRow(icon: ImageVector, title: String, subtitle: String, onClick:
     }
 }
 
+/**
+ * "Update available · Install". Remembers nothing itself: it draws whatever [state] says.
+ * The last state shown is kept while it slides out, so the text doesn't vanish mid-animation.
+ */
+@Composable
+private fun UpdateBanner(state: UpdateState, onInstall: () -> Unit, modifier: Modifier = Modifier) {
+    var shown by remember { mutableStateOf(state) }
+    if (state != UpdateState.None) shown = state
+
+    val (title, detail) = when (val s = shown) {
+        is UpdateState.Available -> "Update available · v${s.versionName}" to s.notes
+        UpdateState.NeedsPermission -> "One more step" to "Switch on \"Allow from this source\", then come back."
+        is UpdateState.Downloading -> "Downloading update · ${(s.progress * 100).toInt()}%" to "Keep the app open."
+        UpdateState.Installing -> "Installing…" to "The app will restart."
+        is UpdateState.Failed -> "Couldn't update" to s.message
+        UpdateState.None -> "" to ""
+    }
+    val buttonLabel = when (shown) {
+        is UpdateState.Available -> "Install"
+        UpdateState.NeedsPermission, is UpdateState.Failed -> "Try again"
+        else -> null
+    }
+
+    Surface(shape = RoundedCornerShape(16.dp), color = MaterialTheme.colorScheme.surface, modifier = modifier.fillMaxWidth()) {
+        Column(Modifier.padding(16.dp), verticalArrangement = Arrangement.spacedBy(10.dp)) {
+            Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(12.dp)) {
+                Icon(Icons.Rounded.SystemUpdate, contentDescription = null)
+                Column(Modifier.weight(1f)) {
+                    Text(title, style = MaterialTheme.typography.titleSmall)
+                    if (detail.isNotBlank()) {
+                        Text(detail, style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant, maxLines = 2)
+                    }
+                }
+                if (buttonLabel != null) {
+                    Button(onClick = onInstall) { Text(buttonLabel) }
+                }
+            }
+            val progress = (shown as? UpdateState.Downloading)?.progress
+            if (progress != null) {
+                LinearProgressIndicator(progress = { progress }, modifier = Modifier.fillMaxWidth())
+            } else if (shown == UpdateState.Installing) {
+                LinearProgressIndicator(Modifier.fillMaxWidth())
+            }
+        }
+    }
+}
+
 /** "What should your pillion call you?" Shown on first use, and when you tap your avatar. */
 @Composable
 fun NameDialog(current: String, onSave: (String) -> Unit, onDismiss: () -> Unit) {
@@ -171,7 +232,13 @@ fun NameDialog(current: String, onSave: (String) -> Unit, onDismiss: () -> Unit)
 private fun HomePreview() {
     PillionTalkTheme(dark = true) {
         Surface(color = MaterialTheme.colorScheme.background) {
-            HomeScreen(myName = "Captain Wheelie", onEditName = {}, onPickRole = {})
+            HomeScreen(
+                myName = "Captain Wheelie",
+                onEditName = {},
+                onPickRole = {},
+                update = UpdateState.Available("0.9.14", "Full-height tiles and join/leave sounds"),
+                versionName = "0.9.12",
+            )
         }
     }
 }

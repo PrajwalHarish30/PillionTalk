@@ -51,6 +51,10 @@
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE" />
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE_MICROPHONE" />
 
+    <!-- Lets the app install its own updates (it still asks you, or Android does, before installing).
+         The first time, Android sends you to a settings switch: "Allow from this source". -->
+    <uses-permission android:name="android.permission.REQUEST_INSTALL_PACKAGES" />
+
     <!-- Android 13+: needed to show the "ride active" notification. A runtime permission. -->
     <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />
 
@@ -77,6 +81,11 @@
             android:name=".ride.RideService"
             android:exported="false"
             android:foregroundServiceType="microphone" />
+
+        <!-- Hears back from Android's installer while an update installs. See Updater.kt. -->
+        <receiver
+            android:name=".update.InstallResultReceiver"
+            android:exported="false" />
 
     </application>
 

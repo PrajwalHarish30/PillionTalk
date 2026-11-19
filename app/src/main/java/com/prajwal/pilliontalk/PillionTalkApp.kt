@@ -26,6 +26,7 @@ import androidx.compose.runtime.setValue
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.LocalContext
 import androidx.core.content.ContextCompat
+import androidx.lifecycle.compose.LifecycleResumeEffect
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import androidx.lifecycle.viewmodel.compose.viewModel
 import com.prajwal.pilliontalk.home.HomeScreen
@@ -59,6 +60,7 @@ fun PillionTalkApp(viewModel: RideViewModel = viewModel()) {
     val state by viewModel.state.collectAsStateWithLifecycle()
     val voice by viewModel.voice.collectAsStateWithLifecycle()
     val myName by viewModel.myName.collectAsStateWithLifecycle()
+    val update by viewModel.update.collectAsStateWithLifecycle()
     val context = LocalContext.current
     val snackbar = remember { SnackbarHostState() }
     val scope = rememberCoroutineScope()
@@ -127,6 +129,13 @@ fun PillionTalkApp(viewModel: RideViewModel = viewModel()) {
 
     val onRide = state != RideState.Idle
 
+    // Each time the app comes to the front (and you're not on a ride), look for an update.
+    // LifecycleResumeEffect runs its block on every "resume", like didChangeAppLifecycleState(resumed).
+    LifecycleResumeEffect(onRide) {
+        if (!onRide) viewModel.onAppResumed()
+        onPauseOrDispose { }
+    }
+
     // On the ride screen, the system back gesture ends the ride instead of closing the app.
     BackHandler(enabled = onRide) { viewModel.end() }
 
@@ -159,6 +168,9 @@ fun PillionTalkApp(viewModel: RideViewModel = viewModel()) {
             } else {
                 HomeScreen(
                     myName = myName,
+                    update = update,
+                    versionName = viewModel.versionName,
+                    onInstallUpdate = viewModel::installUpdate,
                     onEditName = { showNameDialog = true },
                     onPickRole = ::pickRole,
                     modifier = Modifier.padding(innerPadding),

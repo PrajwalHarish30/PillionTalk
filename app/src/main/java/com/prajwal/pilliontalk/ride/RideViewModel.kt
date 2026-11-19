@@ -3,6 +3,7 @@ package com.prajwal.pilliontalk.ride
 import android.app.Application
 import androidx.lifecycle.AndroidViewModel
 import com.prajwal.pilliontalk.PillionTalkApplication
+import com.prajwal.pilliontalk.update.UpdateState
 import com.prajwal.pilliontalk.voice.VoiceStats
 import com.prajwal.pilliontalk.wifidirect.Role
 import kotlinx.coroutines.flow.StateFlow
@@ -19,8 +20,12 @@ class RideViewModel(app: Application) : AndroidViewModel(app) {
     val state: StateFlow<RideState> = controller.state
     val voice: StateFlow<VoiceStats> = controller.voice
     val myName: StateFlow<String> = pillion.profile.name
+    val update: StateFlow<UpdateState> = pillion.updater.state
+    val versionName: String = pillion.updater.installedVersionName
 
     fun setMyName(name: String) = pillion.profile.setName(name)
+    fun onAppResumed() = pillion.updater.onResume()
+    fun installUpdate() = pillion.updater.install()
 
     fun start(role: Role) {
         // Start the foreground service first: it's what lets voice keep going in the background.

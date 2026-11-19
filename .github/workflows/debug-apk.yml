@@ -43,11 +43,19 @@ jobs:
           chmod +x gradlew
           ./gradlew assembleDebug --console=plain
 
-      - name: Name the APK
+      - name: Name the APK and describe it in version.json
         run: |
-          VERSION=$(grep -oP 'versionName = "\K[^"]+' app/build.gradle.kts)
-          echo "VERSION=$VERSION" >> "$GITHUB_ENV"
           cp app/build/outputs/apk/debug/app-debug.apk PillionTalk-debug.apk
+          # Read the version straight out of the built APK, so it can't disagree with the app.
+          AAPT2="$ANDROID_HOME/build-tools/$(ls "$ANDROID_HOME/build-tools" | sort -V | tail -1)/aapt2"
+          BADGING=$("$AAPT2" dump badging PillionTalk-debug.apk | head -1)
+          VERSION_CODE=$(echo "$BADGING" | grep -oP "versionCode='\K[0-9]+")
+          VERSION=$(echo "$BADGING" | grep -oP "versionName='\K[^']+")
+          echo "VERSION=$VERSION" >> "$GITHUB_ENV"
+          # The app downloads this small file to see whether a newer build exists.
+          jq -n --argjson code "$VERSION_CODE" --arg name "$VERSION" --arg notes "$(git log -1 --format=%s)" \
+            '{versionCode: $code, versionName: $name, notes: $notes}' > version.json
+          cat version.json
 
       - name: Publish as the "latest-debug" release
         env:
@@ -62,7 +70,7 @@ jobs:
 
           # Replace the previous release, so the download link always gives the newest build.
           gh release delete latest-debug --yes --cleanup-tag || true
-          gh release create latest-debug PillionTalk-debug.apk \
+          gh release create latest-debug PillionTalk-debug.apk version.json \
             --target "$GITHUB_SHA" \
             --title "Latest debug build (v$VERSION)" \
             --notes-file notes.md

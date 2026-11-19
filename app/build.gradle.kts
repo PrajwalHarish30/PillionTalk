@@ -14,8 +14,14 @@ android {
         applicationId = "com.prajwal.pilliontalk" // the app's unique ID on a phone / Play Store
         minSdk = 31     // Android 12: oldest version we install on (both test phones are 12+)
         targetSdk = 36  // the version whose behaviour rules we've tested against
-        versionCode = 9       // must go up with every build you install over an older one
-        versionName = "0.8.1" // what humans see
+        // The version must go up with every build you install over an older one, and the app's
+        // updater compares it with the newest build on GitHub. GitHub Actions numbers its runs
+        // 1, 2, 3…, so CI builds use that and nobody has to bump it by hand. (+100 keeps them above
+        // the hand-numbered builds from before.) Local builds stay at 1, so a phone running
+        // one always sees the latest CI build as an update.
+        val ciRun = System.getenv("GITHUB_RUN_NUMBER")?.toIntOrNull()
+        versionCode = ciRun?.plus(100) ?: 1
+        versionName = if (ciRun != null) "0.9.$ciRun" else "0.9-local" // what humans see
     }
 
     // Every APK must be signed, and Android only installs an update over an existing app if
